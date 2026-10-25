@@ -14,7 +14,7 @@ Work in progress. Built so far:
 - [x] The browser editor (code-server)
 - [x] Claude Code with its firewall, managed settings and change checks
 - [x] Optional PostgreSQL, and copying in your `.env`
-- [ ] The dev server
+- [x] The dev server
 - [ ] Optional Playwright
 - [ ] Running on a VPS
 
@@ -24,7 +24,7 @@ Work in progress. Built so far:
 - **Each project is separate.** Every VM has its own users, firewall and Claude login, so Claude working on one project can't see another.
 - **Your project lives on the VM's own disk**, cloned from its git repo, not shared from your computer. That keeps it fast and keeps project code off your machine.
 - **Two working users per VM, neither with `sudo`:** `dev` for your daily work (the editor, git, the dev server) and `claude` for Claude Code, which you start from your own terminal through `vagrant ssh`. They share the project through a `project` group.
-- **Your computer only runs a browser.** Each VM's editor and app are reached on your own `localhost`, through forwarded ports.
+- **Your computer only runs a browser.** Each VM's editor, app and database are reached on your own `localhost`, through forwarded ports.
 - **One entry point:** `install.sh` does all the setup inside a VM. Vagrant runs it for you; on a VPS you run it yourself.
 
 ## Requirements
@@ -98,6 +98,25 @@ Claude Code isn't run from the editor; see [Using Claude Code](#using-claude-cod
 
 Safari on older macOS versions can struggle with the editor; a current Chrome or Firefox works best.
 
+## The dev server
+
+The project's dev server runs in the background as `dev`, so the app is always at `http://localhost:5173` (or the `ports.app` you chose). It starts when the machine boots, restarts if it crashes, and reloads as files change.
+
+By default it runs the project's `dev` script (`npm run dev`), set to listen on port 5173 for the forwarded port. For anything else, set `devserver.command`; it must listen on `0.0.0.0:5173`.
+
+Control it from the editor's terminal, or from your computer with `vagrant ssh my-project -c "devserver restart"`:
+
+```bash
+devserver            # is it running?
+devserver restart    # after installing packages or changing its config
+devserver stop       # until the next start or reboot
+devserver start
+devserver log        # the end of its output
+devserver log -f     # follow its output (Ctrl+C to stop)
+```
+
+Claude can read its output, to check for build errors, but can't start or stop it.
+
 ## The database
 
 With `postgres.enabled` set to `true`, the machine runs PostgreSQL (version 18 by default) with a user and the databases listed in `postgres.databases`. Provisioning again adds any new databases; it never drops or changes existing ones.
@@ -125,7 +144,7 @@ The database user isn't a PostgreSQL superuser, on purpose: a superuser can run 
 
 `env/my-project.env` is copied to `/srv/project/.env` on every provision, readable only by `dev` and `claude`. **The copy on your computer wins:** changes made inside the machine are overwritten.
 
-After editing it, copy just that file across, which takes a few seconds instead of a full provision:
+After editing it, copy just that file across, which takes a few seconds instead of a full provision and restarts the dev server so it picks up the change:
 
 ```bash
 vagrant provision --provision-with env-upload,env my-project
@@ -190,6 +209,7 @@ vagrant halt my-project
 vagrant provision my-project  # apply config changes or a Gleipnir update
 genv my-project               # copy just the .env across (see The .env file)
 vagrant reload my-project     # restart it; needed after changing ports
+vagrant ssh my-project -c "devserver restart"   # restart the dev server
 ```
 
 To update Gleipnir itself: `git pull` in this folder, then `vagrant provision <name>` for each running machine.
@@ -207,6 +227,8 @@ Each `machines/<name>.json` file supports:
 | `vm.memory` / `vm.cpus` | 3072 / 2 | VM resources, in MB / cores |
 | `ports.editor` / `ports.app` / `ports.db` | 8080 / 5173 / 54320 | Ports on your computer's `localhost`; each machine needs its own. `db` is only used with PostgreSQL |
 | `node` | 24 | Node.js major version |
+| `devserver.enabled` | `true` | Run the dev server in the background |
+| `devserver.command` | `npm run dev` on port 5173 | The command that starts it; it must listen on `0.0.0.0:5173` |
 | `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry |
 | `postgres.enabled` | `false` | Install PostgreSQL |
 | `postgres.version` | 18 | PostgreSQL major version |

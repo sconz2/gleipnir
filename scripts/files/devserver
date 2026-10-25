@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Gleipnir: control the project's dev server.
+#   devserver [status|start|stop|restart|log [-f]]
+set -euo pipefail
+
+UNIT=gleipnir-dev.service
+LOG=/var/log/gleipnir/devserver.log
+
+usage() {
+  cat <<'EOF'
+Usage: devserver [command]
+
+  status       Is it running? (the default)
+  start        Start it
+  stop         Stop it, until the next start or reboot
+  restart      Restart it, e.g. after changing .env or installing packages
+  log          Show the end of its output
+  log -f       Follow its output as it happens (Ctrl+C to stop)
+EOF
+}
+
+# Run systemctl --user as dev: directly when we are dev, otherwise through sudo
+dev_systemctl() {
+  local runtime
+  runtime="/run/user/$(id -u dev)"
+  if [ "$(id -un)" = dev ]; then
+    XDG_RUNTIME_DIR="$runtime" systemctl --user "$@"
+  elif sudo -n true 2>/dev/null; then
+    sudo -u dev env XDG_RUNTIME_DIR="$runtime" systemctl --user "$@"
+  else
+    echo "devserver: only dev (the editor's terminal) or the admin user can control the dev server." >&2
+    exit 1
+  fi
+}
+
+# Only for the commands that control it; help and log work regardless
+case "${1:-status}" in
+  status|start|stop|restart|try-restart)
+    if [ ! -f "/etc/systemd/user/$UNIT" ]; then
+      echo "devserver: the dev server isn't set up on this machine (see devserver.enabled in its config)." >&2
+      exit 1
+    fi
+    ;;
+esac
+
+case "${1:-status}" in
+  status)
+    dev_systemctl status --no-pager --lines=0 "$UNIT" || true
+    ;;
+  start|restart)
+    dev_systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+    dev_systemctl "$1" "$UNIT"
+    echo "Dev server ${1}ed. Output: devserver log -f"
+    ;;
+  stop)
+    dev_systemctl stop "$UNIT"
+    echo "Dev server stopped."
+    ;;
+  try-restart)
+    # Restart only if it's running. Used after the .env is updated.
+    if dev_systemctl is-active --quiet "$UNIT"; then
+      dev_systemctl restart "$UNIT"
+      echo "Dev server restarted."
+    fi
+    ;;
+  log|logs)
+    if [ "${2:-}" = "-f" ]; then
+      exec tail -n 50 -F "$LOG"
+    else
+      exec tail -n 50 "$LOG"
+    fi
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

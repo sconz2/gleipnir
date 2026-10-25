@@ -153,6 +153,8 @@ Vagrant.configure('2') do |config|
           fi
           install -o dev -g project -m 0640 #{staged} /srv/project/.env
           echo "Gleipnir: .env copied into the project"
+          # Restart the dev server, if it's running, so it picks up the change
+          devserver try-restart 2>/dev/null || true
         SHELL
       end
     end

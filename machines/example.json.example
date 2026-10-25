@@ -4,6 +4,7 @@
   "vm": { "memory": 4096, "cpus": 2 },
   "ports": { "editor": 8080, "app": 5173, "db": 54320 },
   "node": 24,
+  "devserver": { "enabled": true },
   "postgres": {
     "enabled": false,
     "version": 18,
