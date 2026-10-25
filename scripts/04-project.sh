@@ -53,6 +53,7 @@ if [ -n "$git_email" ]; then sudo -u dev -H git config --global user.email "$git
 
 # --- The project folder -------------------------------------------------------
 install -d -o dev -g project -m 2775 "$DEST"
+
 # Only dev (the owner) and claude may run git in the project. Git refuses
 # everyone else, including the admin user, so a hook or setting planted in
 # .git can never run with admin rights.
@@ -74,9 +75,17 @@ if [ ! -d "$DEST/.git" ]; then
   find "$DEST" -type d -exec setfacl -m d:g:project:rwX {} +
 fi
 
+# --- The project's .env, copied from your computer ------------------------------
+# Your computer's copy wins: it replaces the one in the machine on every provision.
+# Readable by dev and claude (for the app and tests), nobody else.
+if [ -n "${GLEIPNIR_ENV:-}" ]; then
+  install -o dev -g project -m 0640 "$GLEIPNIR_ENV" "$DEST/.env"
+  log "Copied .env into the project"
+fi
+
 # --- npm packages, on first setup ---------------------------------------------
 if [ -f "$DEST/package.json" ] && [ ! -d "$DEST/node_modules" ]; then
-  if [ -f "$DEST/package-lock.json" ]; then install_cmd="npm ci"; else install_cmd="npm install"; fi
+    if [ -f "$DEST/package-lock.json" ]; then install_cmd="npm ci"; else install_cmd="npm install"; fi
   log "Installing npm packages ($install_cmd)"
   sudo -u dev -H bash -c "cd '$DEST' && $install_cmd"
 fi

@@ -13,7 +13,7 @@ require 'json'
 
 root = File.expand_path(__dir__)
 
-# Where each VM receives the scripts, config and key: a folder only vagrant can read
+# Where each VM receives the scripts, config, key and .env: a folder only vagrant can read
 upload = '/home/vagrant/.gleipnir'
 
 # --- Read every machine config ------------------------------------------------
@@ -39,14 +39,23 @@ machines = Dir.glob(File.join(root, 'machines', '*.json')).sort.map do |file|
     abort "Gleipnir: #{where}: deploy key not found at #{key}." unless File.exist?(key)
   end
 
+  env_file = nil
+  if settings['env_file']
+    env_file = File.expand_path(settings['env_file'], root)
+    abort "Gleipnir: #{where}: env file not found at #{env_file}." unless File.exist?(env_file)
+  end
+
   ports = settings['ports'] || {}
+  postgres = settings['postgres'] || {}
   {
     name: name,
     file: file,
     settings: settings,
     key: key,
+    env_file: env_file,
     editor_port: ports.fetch('editor', 8080),
-    app_port: ports.fetch('app', 5173)
+    app_port: ports.fetch('app', 5173),
+    db_port: postgres['enabled'] == true ? ports.fetch('db', 54320) : nil
   }
 end
 
@@ -59,6 +68,7 @@ owners = Hash.new { |hash, port| hash[port] = [] }
 machines.each do |m|
   owners[m[:editor_port]] << "#{m[:name]} (editor)"
   owners[m[:app_port]] << "#{m[:name]} (app)"
+  owners[m[:db_port]] << "#{m[:name]} (database)" if m[:db_port]
 end
 clashes = owners.select { |_port, users| users.size > 1 }
 unless clashes.empty?
@@ -83,6 +93,9 @@ Vagrant.configure('2') do |config|
       # The editor and the app, reachable only from your computer's own localhost
       machine.vm.network 'forwarded_port', guest: 8080, host: m[:editor_port], host_ip: '127.0.0.1'
       machine.vm.network 'forwarded_port', guest: 5173, host: m[:app_port], host_ip: '127.0.0.1'
+      if m[:db_port]
+        machine.vm.network 'forwarded_port', guest: 5432, host: m[:db_port], host_ip: '127.0.0.1'
+      end
 
       machine.vm.provider 'virtualbox' do |vb|
         vb.name = "gleipnir-#{m[:name]}"
@@ -90,21 +103,43 @@ Vagrant.configure('2') do |config|
         vb.cpus = vm_settings.fetch('cpus', 2)
       end
 
-      # Upload Gleipnir's scripts, this machine's config and its deploy key
+      # Upload Gleipnir's scripts, this machine's config, deploy key and .env
       machine.vm.provision 'shell', name: 'Gleipnir: preparing upload',
         inline: "rm -rf #{upload} && install -d -m 0700 -o vagrant -g vagrant #{upload}"
       machine.vm.provision 'file', source: File.join(root, 'install.sh'), destination: "#{upload}/install.sh"
       machine.vm.provision 'file', source: File.join(root, 'scripts'), destination: "#{upload}/scripts"
       machine.vm.provision 'file', source: m[:file], destination: "#{upload}/config.json"
       machine.vm.provision 'file', source: m[:key], destination: "#{upload}/deploy_key" if m[:key]
+      machine.vm.provision 'file', source: m[:env_file], destination: "#{upload}/env" if m[:env_file]
 
-      # The same entry point as on a VPS
-      install_args = "#{upload}/config.json"
-      install_args += " #{upload}/deploy_key" if m[:key]
+      # The same entry point as on a VPS. An empty argument means "none".
+      install_args = [
+        "#{upload}/config.json",
+        m[:key] ? "#{upload}/deploy_key" : '',
+        m[:env_file] ? "#{upload}/env" : ''
+      ].map { |arg| "\"#{arg}\"" }.join(' ')
       machine.vm.provision 'shell', name: 'Gleipnir: install', inline: "bash #{upload}/install.sh #{install_args}"
 
-      # Tidy up: the key now lives only in dev's home inside the VM
+      # Tidy up: the key and .env now live only where install.sh put them
       machine.vm.provision 'shell', name: 'Gleipnir: cleaning up', inline: "rm -rf #{upload}"
+
+      # Copy just the .env, without a full provision. These only run when asked for:
+      #   vagrant provision my-project --provision-with env-upload,env
+      if m[:env_file]
+        staged = '/home/vagrant/.gleipnir-env'
+        machine.vm.provision 'env-upload', type: 'file', run: 'never',
+          source: m[:env_file], destination: staged
+        machine.vm.provision 'env', type: 'shell', run: 'never', inline: <<~SHELL
+          set -e
+          trap 'rm -f #{staged}' EXIT
+          if [ ! -d /srv/project ]; then
+            echo "Gleipnir: the project isn't set up yet; run a full provision first." >&2
+            exit 1
+          fi
+          install -o dev -g project -m 0640 #{staged} /srv/project/.env
+          echo "Gleipnir: .env copied into the project"
+        SHELL
+      end
     end
   end
 end

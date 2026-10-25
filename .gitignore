@@ -1,8 +1,10 @@
 /.vagrant
 
-# Your machine configs and deploy keys stay on your computer
+# Your machine configs, deploy keys and .env files stay on your computer
 /machines/*.json
 /keys/*
 !/keys/.gitkeep
+/env/*
+!/env/.gitkeep
 
 .DS_Store

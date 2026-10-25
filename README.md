@@ -13,8 +13,9 @@ Work in progress. Built so far:
 - [x] The VMs, users, Node.js and cloning your project
 - [x] The browser editor (code-server)
 - [x] Claude Code with its firewall, managed settings and change checks
+- [x] Optional PostgreSQL, and copying in your `.env`
 - [ ] The dev server
-- [ ] Optional PostgreSQL and Playwright
+- [ ] Optional Playwright
 - [ ] Running on a VPS
 
 ## How it works
@@ -35,6 +36,16 @@ Work in progress. Built so far:
 
 ## Adding a project
 
+Everything for a machine is named after it. For a machine called `my-project`:
+
+| File | What it is |
+| --- | --- |
+| `machines/my-project.json` | Its config. The file name is the VM's name: lowercase letters, digits and dashes |
+| `keys/my-project` | The repo's deploy key (the private half; `keys/my-project.pub` is the half you give GitHub). Needed for `git@…` repo URLs |
+| `env/my-project.env` | The project's `.env` file. Optional: used if it's there |
+
+All three folders are ignored by git, so none of them end up in Gleipnir's own repo. To use a file with a different name, give its path in the config with `deploy_key` or `env_file` (see [Configuration](#configuration)).
+
 1. **Create a deploy key** for the project's repo, without a passphrase, in Gleipnir's `keys/` folder:
 
    ```bash
@@ -44,21 +55,21 @@ Work in progress. Built so far:
 
    On GitHub, open the project repo's **Settings → Deploy keys**, add the public key, and tick **Allow write access**. The key only works on that one repo.
 
-2. **Create the machine's config.** The file name becomes the VM's name: lowercase letters, digits and dashes.
+2. **Create the machine's config:**
 
    ```bash
    cp machines/example.json.example machines/my-project.json
    ```
 
-   Set `repo` (the `git@github.com:…` form), `deploy_key` and your git name and email. If another machine already uses ports 8080 and 5173, pick different `ports`.
+   Set `repo` (the `git@github.com:…` form) and your git name and email. If another machine already uses ports 8080, 5173 or 54320, pick different `ports`. For a database, set `postgres.enabled` to `true` and choose a password (see [The database](#the-database)).
+
+   If the project needs a `.env` file, save it as `env/my-project.env`.
 
 3. **Start it:**
 
    ```bash
    vagrant up my-project
    ```
-
-Your configs in `machines/` and keys in `keys/` are ignored by git, so they never end up in Gleipnir's own repo.
 
 ### Checking it worked
 
@@ -83,9 +94,50 @@ vagrant ssh my-project -c "sudo grep password: /home/dev/.config/code-server/con
 
 The editor runs as the `dev` user and opens your project in `/srv/project`. Its built-in terminal is a shell as `dev`, for git, npm and tests. Use the Source Control view to review changes and commit.
 
-Claude Code isn't run from the editor; see the next section.
+Claude Code isn't run from the editor; see [Using Claude Code](#using-claude-code).
 
 Safari on older macOS versions can struggle with the editor; a current Chrome or Firefox works best.
+
+## The database
+
+With `postgres.enabled` set to `true`, the machine runs PostgreSQL (version 18 by default) with a user and the databases listed in `postgres.databases`. Provisioning again adds any new databases; it never drops or changes existing ones.
+
+Inside the machine, the app, tests and Claude connect to `127.0.0.1:5432`. Point your `.env` there:
+
+```
+DATABASE_URL=postgres://app:change-me@127.0.0.1:5432/my_project
+```
+
+From your computer, use any database tool (TablePlus, DBeaver, DataGrip, `psql`) with:
+
+| Setting | Value |
+| --- | --- |
+| Host | `localhost` |
+| Port | `54320` (or the `ports.db` you chose) |
+| User / password | `postgres.user` / `postgres.password` |
+| Database | one of `postgres.databases` |
+
+The port only listens on your computer's own `localhost`, so nothing else on your network can reach it.
+
+The database user isn't a PostgreSQL superuser, on purpose: a superuser can run shell commands on the server, which would let anything holding the password step around the machine's restrictions. For admin work, run `sudo -u postgres psql` after `vagrant ssh`.
+
+### The `.env` file
+
+`env/my-project.env` is copied to `/srv/project/.env` on every provision, readable only by `dev` and `claude`. **The copy on your computer wins:** changes made inside the machine are overwritten.
+
+After editing it, copy just that file across, which takes a few seconds instead of a full provision:
+
+```bash
+vagrant provision --provision-with env-upload,env my-project
+```
+
+To save typing, add an alias to your shell profile (`~/.zshrc` on a Mac) that works for any machine:
+
+```bash
+alias genv='vagrant provision --provision-with env-upload,env'
+```
+
+Then, from the Gleipnir folder, run `genv my-project`.
 
 ## Using Claude Code
 
@@ -136,6 +188,8 @@ vagrant up my-project         # start one (a bare `vagrant up` starts none)
 vagrant ssh my-project
 vagrant halt my-project
 vagrant provision my-project  # apply config changes or a Gleipnir update
+genv my-project               # copy just the .env across (see The .env file)
+vagrant reload my-project     # restart it; needed after changing ports
 ```
 
 To update Gleipnir itself: `git pull` in this folder, then `vagrant provision <name>` for each running machine.
@@ -147,12 +201,17 @@ Each `machines/<name>.json` file supports:
 | Field | Default | What it sets |
 | --- | --- | --- |
 | `repo` | (required) | Git URL cloned into `/srv/project` |
-| `deploy_key` | (required for SSH repos) | Path to the repo's deploy key, relative to the Gleipnir folder |
+| `deploy_key` | `keys/<name>` | The repo's deploy key, if it's named differently. Relative to the Gleipnir folder |
+| `env_file` | `env/<name>.env` | The project's `.env`, if it's named differently. Relative to the Gleipnir folder |
 | `git.name` / `git.email` | none | Your identity for commits made in the VM |
 | `vm.memory` / `vm.cpus` | 3072 / 2 | VM resources, in MB / cores |
-| `ports.editor` / `ports.app` | 8080 / 5173 | Ports on your computer's `localhost`; each machine needs its own |
+| `ports.editor` / `ports.app` / `ports.db` | 8080 / 5173 / 54320 | Ports on your computer's `localhost`; each machine needs its own. `db` is only used with PostgreSQL |
 | `node` | 24 | Node.js major version |
 | `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry |
+| `postgres.enabled` | `false` | Install PostgreSQL |
+| `postgres.version` | 18 | PostgreSQL major version |
+| `postgres.user` / `postgres.password` | `app` / (required) | The database user for your app |
+| `postgres.databases` | none | Databases to create, owned by that user |
 | `claude.network` | `allowlist` | `allowlist`, or `open` to let Claude reach any site |
 | `claude.allowed_domains` | none | Extra sites Claude may reach, by exact name |
 | `claude.autocommit` | `true` | Claude works and commits on a `wip/` branch |
@@ -162,7 +221,7 @@ Gleipnir refuses to start if two machines use the same port, and tells you which
 
 ## Important: your work lives in the VM
 
-The project isn't on your computer. Until you push, the only copy of your work is inside its VM, and `vagrant destroy` deletes it. Push often.
+The project isn't on your computer. Until you push, the only copy of your work is inside its VM, and `vagrant destroy` deletes it. Push often. The database lives in the VM too, so `vagrant destroy` deletes its data as well.
 
 ## Known gaps
 
@@ -172,7 +231,7 @@ Gleipnir keeps Claude well away from your computer, but inside the machine it is
 - **Gjöll works by IP address.** Sites on big shared hosting (Cloudflare, Vercel and similar) share addresses with other sites, so allowing one lets some others through. Keep the list short.
 - **DNS lookups aren't restricted**, and can carry small amounts of data out.
 - **`.env` protection only covers Claude's file tools.** A shell command run by Claude can still read the file. Keep real production secrets out of these machines.
-- **Claude can read and change everything in the project**, including `.git`, and any local databases. Use test data, not real personal records.
+- **Claude can read and change everything in the project**, including `.git`, and the local database (the password is in `.env`). Use test data, not real personal records.
 - **The commit guard and npm setting are guardrails, not locks.** The real protection is that only you merge and push.
 
 ## Licence
