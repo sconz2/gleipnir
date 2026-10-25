@@ -4,5 +4,11 @@
   "git": { "name": "Your Name", "email": "you@example.com" },
   "vm": { "memory": 4096, "cpus": 2 },
   "ports": { "editor": 8080, "app": 5173 },
-  "node": 24
+  "node": 24,
+  "claude": {
+    "network": "allowlist",
+    "allowed_domains": [],
+    "autocommit": true,
+    "checks": true
+  }
 }

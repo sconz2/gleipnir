@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Gleipnir: refuses commits made by Claude anywhere but its own wip/ branch.
+# Only applies inside Claude's sessions; your own commits as dev aren't affected.
+
+branch="$(git symbolic-ref --short -q HEAD || echo '(no branch)')"
+case "$branch" in
+  wip/*) exit 0 ;;
+esac
+
+echo "Gleipnir: Claude's commits belong on a wip/ branch, not '$branch'." >&2
+exit 1

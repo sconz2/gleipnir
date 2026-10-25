@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Gleipnir: the `claude` command. Starts Claude Code as the restricted claude user,
+# in the project. Run it after `vagrant ssh <machine>`.
+set -uo pipefail
+
+PROJECT=/srv/project
+REAL="$(cat /etc/gleipnir/claude-bin 2>/dev/null || echo /usr/bin/claude)"
+
+# Inside Claude's own sessions, this name goes straight to Claude Code
+if [ "$(id -un)" = "claude" ]; then
+  exec "$REAL" "$@"
+fi
+
+if ! sudo -n true 2>/dev/null; then
+  echo "Gleipnir: start Claude from your own terminal: vagrant ssh <machine>, then claude." >&2
+  exit 1
+fi
+
+# Gjöll must be up before Claude starts
+network="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
+if [ "$network" = "allowlist" ] && ! sudo -n /usr/local/sbin/gjoll-firewall --check; then
+  echo "Gleipnir: the firewall (Gjöll) isn't active, so Claude wasn't started." >&2
+  echo "Start it with: sudo systemctl start gjoll-firewall" >&2
+  exit 1
+fi
+
+# Git commands on the project run as dev, never as this admin user
+as_dev() { sudo -n -u dev -H "$@"; }
+
+# Claude works on its own wip/ branch; you review, merge and push
+hooks_env=""
+if [ -f /etc/gleipnir/claude-autocommit ]; then
+  branch="$(as_dev git -C "$PROJECT" symbolic-ref --short -q HEAD || true)"
+  case "$branch" in
+    wip/*) ;;
+    *)
+      target="wip/$(date +%F)"
+      if as_dev git -C "$PROJECT" show-ref --verify --quiet "refs/heads/$target"; then
+        if ! as_dev git -C "$PROJECT" switch -q "$target"; then
+          echo "Gleipnir: couldn't switch to $target. Commit or stash your changes, then try again." >&2
+          exit 1
+        fi
+      else
+        as_dev git -C "$PROJECT" switch -q -c "$target"
+      fi
+      echo "Gleipnir: Claude is working on branch $target"
+      ;;
+  esac
+  # A guard hook that refuses Claude's commits anywhere but a wip/ branch
+  hooks_env="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/etc/gleipnir/git-hooks;"
+fi
+
+# Heimdall: a snapshot before the session, kept where Claude can't touch it
+snap=""
+if [ -f /etc/gleipnir/heimdall ]; then
+  snap="$(as_dev mktemp)"
+  as_dev /usr/local/bin/heimdall-check --snapshot "$snap" "$PROJECT" || true
+fi
+
+cd /
+sudo -n -u claude -H bash -lc "$hooks_env"' cd /srv/project && exec "$0" "$@"' "$REAL" "$@"
+status=$?
+
+# Heimdall: what changed during the session
+if [ -n "$snap" ]; then
+  as_dev /usr/local/bin/heimdall-check --summary "$snap" "$PROJECT" || true
+  as_dev rm -f "$snap"
+fi
+
+exit "$status"

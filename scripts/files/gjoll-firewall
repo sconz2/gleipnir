@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Gleipnir: Gjöll, the firewall for the claude user only. Everything else in the
+# machine (provisioning, npm installs as dev, the dev server) is unaffected.
+#
+#   gjoll-firewall             apply the rules if missing, refresh the allowlist
+#   gjoll-firewall --rebuild   remove and re-create the rules
+#   gjoll-firewall --remove    remove the rules
+#   gjoll-firewall --check     exit 0 only if the rules are in place
+#   gjoll-firewall --verify    apply, then test that blocking works
+set -uo pipefail
+
+USER_NAME=claude
+CHAIN=GJOLL
+SET=gjoll-allowed
+SET_NEW=gjoll-allowed-new
+DOMAINS=/etc/gleipnir/allowed-domains
+MODE="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
+
+jump_present() {
+  "$1" -C OUTPUT -m owner --uid-owner "$USER_NAME" -j "$CHAIN" >/dev/null 2>&1
+}
+
+rules_present() {
+  local ipt
+  for ipt in iptables ip6tables; do
+    jump_present "$ipt" || return 1
+    if [ "$MODE" = "open" ]; then
+      "$ipt" -C "$CHAIN" -j ACCEPT >/dev/null 2>&1 || return 1
+    else
+      "$ipt" -C "$CHAIN" -j REJECT >/dev/null 2>&1 || return 1
+    fi
+  done
+}
+
+remove_rules() {
+  local ipt
+  for ipt in iptables ip6tables; do
+    while "$ipt" -D OUTPUT -m owner --uid-owner "$USER_NAME" -j "$CHAIN" 2>/dev/null; do :; done
+    "$ipt" -F "$CHAIN" 2>/dev/null || true
+    "$ipt" -X "$CHAIN" 2>/dev/null || true
+  done
+  ipset destroy "$SET" 2>/dev/null || true
+}
+
+# Built before any lookups, so a failure later leaves claude with no network,
+# not unrestricted network
+build_rules() {
+  local ipt
+  ipset create "$SET" hash:net -exist
+  for ipt in iptables ip6tables; do
+    "$ipt" -N "$CHAIN" 2>/dev/null || "$ipt" -F "$CHAIN"
+    "$ipt" -A "$CHAIN" -o lo -j ACCEPT
+    "$ipt" -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    if [ "$MODE" = "open" ]; then
+      "$ipt" -A "$CHAIN" -m conntrack --ctstate NEW -j LOG --log-prefix "gjoll claude: " --log-uid
+      "$ipt" -A "$CHAIN" -j ACCEPT
+    else
+      if [ "$ipt" = "iptables" ]; then
+        "$ipt" -A "$CHAIN" -m set --match-set "$SET" dst -j ACCEPT
+      fi
+      "$ipt" -A "$CHAIN" -j REJECT
+    fi
+    jump_present "$ipt" || "$ipt" -I OUTPUT 1 -m owner --uid-owner "$USER_NAME" -j "$CHAIN"
+  done
+}
+
+# Look up the allowed sites (DNS and /etc/hosts) into a new set, then swap it in
+refresh_allowlist() {
+  [ "$MODE" = "open" ] && return 0
+  if [ ! -f "$DOMAINS" ]; then
+    echo "Gjöll: $DOMAINS not found; claude has no outbound access" >&2
+    return 0
+  fi
+  local domain ips ip count=0
+  ipset create "$SET_NEW" hash:net -exist
+  ipset flush "$SET_NEW"
+  while IFS= read -r domain || [ -n "$domain" ]; do
+    domain="${domain%%#*}"
+    domain="$(printf '%s' "$domain" | tr -d '[:space:]')"
+    [ -z "$domain" ] && continue
+    ips="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u)"
+    if [ -z "$ips" ]; then
+      echo "Gjöll: WARNING: couldn't look up $domain" >&2
+      continue
+    fi
+    for ip in $ips; do
+      ipset add "$SET_NEW" "$ip" -exist && count=$((count + 1))
+    done
+  done < "$DOMAINS"
+
+  if [ "$count" -gt 0 ]; then
+    ipset swap "$SET_NEW" "$SET"
+    echo "Gjöll: allowlist refreshed ($count addresses)"
+  else
+    echo "Gjöll: WARNING: no addresses found; keeping the previous allowlist" >&2
+  fi
+  ipset destroy "$SET_NEW" 2>/dev/null || true
+}
+
+verify() {
+  if sudo -u "$USER_NAME" curl -s --max-time 5 -o /dev/null https://example.com; then
+    echo "Gjöll: ERROR: the claude user can reach example.com, so the firewall isn't working" >&2
+    return 1
+  fi
+  if ! sudo -u "$USER_NAME" curl -s --max-time 10 -o /dev/null https://api.anthropic.com; then
+    echo "Gjöll: WARNING: the claude user can't reach api.anthropic.com; Claude Code may not work" >&2
+  fi
+  echo "Gjöll: verified"
+}
+
+case "${1:-}" in
+  "")        rules_present || build_rules; refresh_allowlist ;;
+  --rebuild) remove_rules; build_rules; refresh_allowlist ;;
+  --remove)  remove_rules; echo "Gjöll: removed" ;;
+  --check)   rules_present ;;
+  --verify)  rules_present || build_rules; refresh_allowlist; verify ;;
+  *)         echo "usage: $0 [--rebuild|--remove|--check|--verify]" >&2; exit 2 ;;
+esac

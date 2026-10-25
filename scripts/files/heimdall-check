@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""Gleipnir: Heimdall, the change checks. Flags changes to files that can run
+code (package scripts, tool configs, shell scripts), npm package changes, and
+new git settings or hooks that run commands.
+
+Claude Code hooks (set in the managed settings, run as the claude user):
+  heimdall-check --hook-start     SessionStart: record a baseline
+  heimdall-check --hook           Stop: report what changed since the last check
+
+The claude command (runs as dev, outside Claude's reach):
+  heimdall-check --snapshot FILE DIR
+  heimdall-check --summary FILE DIR
+"""
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+
+HEADER = "Heimdall: review these before merging Claude's work."
+
+# Folders never scanned (dependencies, build output, git internals)
+SKIP_DIRS = {"node_modules", ".git", ".svelte-kit", "build", "dist", ".next", ".nuxt", ".output", ".vercel"}
+
+# Files that can make something run code
+SENSITIVE_NAMES = [
+    "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock",
+    ".npmrc", ".yarnrc", ".yarnrc.yml", ".envrc", "Makefile", "Vagrantfile", "*.sh",
+    "*.config.js", "*.config.cjs", "*.config.mjs", "*.config.ts", "*.config.cts", "*.config.mts",
+    ".eslintrc*", ".prettierrc*", ".babelrc*",
+]
+# Every file inside these folders counts (editor tasks, IDE run configurations, git hook managers)
+SENSITIVE_DIRS = {".vscode", ".idea", ".husky"}
+# Changes constantly while you work
+IGNORED_FILES = {os.path.join(".idea", "workspace.xml")}
+# Git settings whose value is a command git will run
+RISKY_GIT_CONFIG = re.compile(
+    r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor|askpass)|diff\.external"
+    r"|diff\..+\.(command|textconv)|filter\..+|merge\..+\.driver|alias\..+"
+    r"|credential\..+|include\.path|includeif\..+)$"
+)
+MAX_DEPTH = 3
+
+
+def project_root(path):
+    try:
+        out = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.path.abspath(path)
+
+
+def walk(root, max_depth):
+    for cur, dirs, files in os.walk(root):
+        rel = os.path.relpath(cur, root)
+        parts = [] if rel == "." else rel.split(os.sep)
+        if len(parts) >= max_depth:
+            dirs[:] = []
+        else:
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        yield parts, files
+
+
+def sensitive_files(root):
+    found = []
+    for parts, files in walk(root, MAX_DEPTH):
+        in_dir = bool(SENSITIVE_DIRS.intersection(parts)) or parts[:2] == [".github", "workflows"]
+        for name in files:
+            rel = os.path.join(*parts, name) if parts else name
+            if rel in IGNORED_FILES:
+                continue
+            if in_dir or any(fnmatch.fnmatch(name, pattern) for pattern in SENSITIVE_NAMES):
+                found.append(rel)
+    return sorted(found)
+
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def lock_packages(path):
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    packages = {}
+    for key, meta in (data.get("packages") or {}).items():
+        if key:
+            packages[key] = [key.split("node_modules/")[-1], (meta or {}).get("version", "")]
+    return packages
+
+
+def git_state(root):
+    state = {"hooks": [], "config": []}
+    gitdir = os.path.join(root, ".git")
+    if not os.path.isdir(gitdir):
+        return state
+    try:
+        state["hooks"] = sorted(f for f in os.listdir(os.path.join(gitdir, "hooks"))
+                                if not f.endswith(".sample"))
+    except OSError:
+        pass
+    try:
+        # `git config` doesn't run hooks or fsmonitor
+        out = subprocess.run(["git", "-C", root, "config", "--local", "--list"],
+                             capture_output=True, text=True, timeout=10)
+        for line in out.stdout.splitlines():
+            if RISKY_GIT_CONFIG.match(line.split("=", 1)[0].lower()):
+                state["config"].append(line)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return state
+
+
+def take_state(root):
+    return {
+        "files": {f: file_hash(os.path.join(root, f)) for f in sensitive_files(root)},
+        "packages": lock_packages(os.path.join(root, "package-lock.json")),
+        "git": git_state(root),
+    }
+
+
+def package_changes(old, new):
+    lines = []
+    for key, (name, version) in sorted(new.items()):
+        if key not in old:
+            lines.append(f"added    {name}@{version}")
+        elif old[key][1] != version:
+            lines.append(f"changed  {name} {old[key][1]} -> {version}")
+    for key, (name, version) in sorted(old.items()):
+        if key not in new:
+            lines.append(f"removed  {name}@{version}")
+    return lines
+
+
+def diff_states(old, new):
+    lines = []
+    old_files, new_files = old.get("files", {}), new["files"]
+    changed = ([("added   ", f) for f in new_files if f not in old_files]
+               + [("changed ", f) for f in new_files if f in old_files and old_files[f] != new_files[f]]
+               + [("removed ", f) for f in old_files if f not in new_files])
+    if changed:
+        lines.append("Files that can run code were changed:")
+        lines += [f"  {kind}{path}" for kind, path in sorted(changed, key=lambda item: item[1])]
+
+    packages = package_changes(old.get("packages", {}), new["packages"])
+    if packages:
+        lines.append("npm packages changed (check the names for typos or look-alikes):")
+        lines += [f"  {p}" for p in packages[:30]]
+        if len(packages) > 30:
+            lines.append(f"  ...and {len(packages) - 30} more")
+
+    old_git, new_git = old.get("git", {}), new["git"]
+    new_hooks = sorted(set(new_git["hooks"]) - set(old_git.get("hooks", [])))
+    new_config = sorted(set(new_git["config"]) - set(old_git.get("config", [])))
+    if new_hooks or new_config:
+        lines.append("Git settings that run commands were added:")
+        lines += [f"  .git/hooks/{h}" for h in new_hooks]
+        lines += [f"  .git/config: {c}" for c in new_config]
+    return lines
+
+
+def save(path, state):
+    with open(path, "w") as fh:
+        json.dump(state, fh)
+
+
+def load(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def hook_state_path(session_id):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:80] or "default"
+    folder = os.path.join(os.path.expanduser("~"), ".cache", "heimdall")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, safe + ".json")
+
+
+def run_hook(start):
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        data = {}
+    root = project_root(os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd())
+    path = hook_state_path(data.get("session_id"))
+    new = take_state(root)
+    if not start:
+        old = load(path)
+        if old:
+            lines = diff_states(old, new)
+            if lines:
+                print(json.dumps({"systemMessage": "\n".join([HEADER] + lines)}))
+    save(path, new)
+
+
+def run_summary(snapshot, directory):
+    root = project_root(directory)
+    old = load(snapshot)
+    lines = diff_states(old, take_state(root)) if old else ["(no snapshot was taken at the start of the session)"]
+    print()
+    if lines:
+        print("=" * 72)
+        print(HEADER)
+        for line in lines:
+            print(line)
+        print("=" * 72)
+    else:
+        print("Heimdall: nothing that can run code changed this session.")
+
+
+def main(argv):
+    mode = argv[1] if len(argv) > 1 else ""
+    if mode in ("--hook-start", "--hook"):
+        try:
+            run_hook(start=(mode == "--hook-start"))
+        except Exception as exc:  # a failed check must never break Claude Code
+            print(json.dumps({"systemMessage": f"Heimdall: check failed: {exc}"}))
+        return 0
+    if mode == "--snapshot" and len(argv) >= 3:
+        save(argv[2], take_state(project_root(argv[3] if len(argv) > 3 else os.getcwd())))
+        return 0
+    if mode == "--summary" and len(argv) >= 3:
+        run_summary(argv[2], argv[3] if len(argv) > 3 else os.getcwd())
+        return 0
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -12,7 +12,7 @@ Work in progress. Built so far:
 
 - [x] The VMs, users, Node.js and cloning your project
 - [x] The browser editor (code-server)
-- [ ] Claude Code with its firewall, managed settings and change checks
+- [x] Claude Code with its firewall, managed settings and change checks
 - [ ] The dev server
 - [ ] Optional PostgreSQL and Playwright
 - [ ] Running on a VPS
@@ -83,9 +83,50 @@ vagrant ssh my-project -c "sudo grep password: /home/dev/.config/code-server/con
 
 The editor runs as the `dev` user and opens your project in `/srv/project`. Its built-in terminal is a shell as `dev`, for git, npm and tests. Use the Source Control view to review changes and commit.
 
-Claude Code isn't run from the editor. You'll start it from a terminal on your computer, through `vagrant ssh`, once that step is built.
+Claude Code isn't run from the editor; see the next section.
 
 Safari on older macOS versions can struggle with the editor; a current Chrome or Firefox works best.
+
+## Using Claude Code
+
+Start Claude from a terminal on your computer:
+
+```bash
+vagrant ssh my-project
+claude
+```
+
+Or in one step: `vagrant ssh my-project -- -t claude`. The first time, Claude Code shows a login link: open it in your browser, sign in, and paste the code back.
+
+The `claude` command:
+
+1. Checks that **Gjöll**, the firewall, is up, and refuses to start if it isn't.
+2. Switches the project to a `wip/<date>` branch, so Claude's work stays off `main`.
+3. Takes a snapshot for **Heimdall**, then starts Claude Code as the restricted `claude` user, in `/srv/project`.
+4. When you exit Claude, prints Heimdall's summary of anything changed that can run code.
+
+### Reviewing and merging Claude's work
+
+Claude commits as it goes on its `wip/` branch, and anything left over is saved as a "Checkpoint" commit at the end of each turn. Claude can't commit to `main`, and never pushes. In the editor's terminal:
+
+```bash
+git diff main...wip/2026-10-25        # everything on the branch
+git switch main
+git merge --squash wip/2026-10-25     # all of it as one change
+git commit                            # write the final message
+git push
+git branch -D wip/2026-10-25
+```
+
+### What holds Claude in place
+
+- **The `claude` user** has no `sudo` and can't read `dev`'s home, so your git key and editor password are out of its reach.
+- **Týr**, the managed settings in `/etc/claude-code/`, are owned by root and override any user or project settings. They block Claude's file tools from `.env` files, turn off non-essential traffic, and run Heimdall's checks. Claude also gets a root-owned `CLAUDE.md` describing the machine and its git rules.
+- **Gjöll** limits the `claude` user to Anthropic, the npm registry and the sites you list in `claude.allowed_domains`. Nothing else in the machine is restricted. It refreshes the sites' addresses every 30 minutes.
+- **Heimdall** flags changes to package scripts, tool configs and shell scripts, npm package changes (watch for look-alike names), and new git hooks or settings that run commands: after each turn, and in a summary when you exit.
+- **npm install scripts** are off for the `claude` user.
+
+To let Claude reach another site, add it to `claude.allowed_domains` and run `vagrant provision my-project`. Setting `claude.network` to `"open"` removes the allowlist entirely; Claude's connections are then logged (`sudo journalctl -k | grep gjoll`). Use it only on machines with nothing sensitive in them.
 
 ## Everyday commands
 
@@ -112,12 +153,27 @@ Each `machines/<name>.json` file supports:
 | `ports.editor` / `ports.app` | 8080 / 5173 | Ports on your computer's `localhost`; each machine needs its own |
 | `node` | 24 | Node.js major version |
 | `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry |
+| `claude.network` | `allowlist` | `allowlist`, or `open` to let Claude reach any site |
+| `claude.allowed_domains` | none | Extra sites Claude may reach, by exact name |
+| `claude.autocommit` | `true` | Claude works and commits on a `wip/` branch |
+| `claude.checks` | `true` | Heimdall's change checks |
 
 Gleipnir refuses to start if two machines use the same port, and tells you which.
 
 ## Important: your work lives in the VM
 
 The project isn't on your computer. Until you push, the only copy of your work is inside its VM, and `vagrant destroy` deletes it. Push often.
+
+## Known gaps
+
+Gleipnir keeps Claude well away from your computer, but inside the machine it isn't sealed:
+
+- **The dev server isn't firewalled.** It runs code Claude can edit, as `dev`, with normal network access.
+- **Gjöll works by IP address.** Sites on big shared hosting (Cloudflare, Vercel and similar) share addresses with other sites, so allowing one lets some others through. Keep the list short.
+- **DNS lookups aren't restricted**, and can carry small amounts of data out.
+- **`.env` protection only covers Claude's file tools.** A shell command run by Claude can still read the file. Keep real production secrets out of these machines.
+- **Claude can read and change everything in the project**, including `.git`, and any local databases. Use test data, not real personal records.
+- **The commit guard and npm setting are guardrails, not locks.** The real protection is that only you merge and push.
 
 ## Licence
 
