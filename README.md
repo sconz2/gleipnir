@@ -11,7 +11,7 @@ In Norse myth, Gleipnir was the binding that held the giant wolf Fenrir: as thin
 Work in progress. Built so far:
 
 - [x] The VMs, users, Node.js and cloning your project
-- [ ] The browser editor (code-server)
+- [x] The browser editor (code-server)
 - [ ] Claude Code with its firewall, managed settings and change checks
 - [ ] The dev server
 - [ ] Optional PostgreSQL and Playwright
@@ -22,7 +22,7 @@ Work in progress. Built so far:
 - **One Gleipnir folder, one VM per project.** Each file in `machines/` defines a VM, named after the file. Update Gleipnir once and every VM picks it up on its next provision.
 - **Each project is separate.** Every VM has its own users, firewall and Claude login, so Claude working on one project can't see another.
 - **Your project lives on the VM's own disk**, cloned from its git repo, not shared from your computer. That keeps it fast and keeps project code off your machine.
-- **Two working users per VM, neither with `sudo`:** `dev` for your daily work (the editor, git, the dev server) and `claude` for Claude Code. They share the project through a `project` group.
+- **Two working users per VM, neither with `sudo`:** `dev` for your daily work (the editor, git, the dev server) and `claude` for Claude Code, which you start from your own terminal through `vagrant ssh`. They share the project through a `project` group.
 - **Your computer only runs a browser.** Each VM's editor and app are reached on your own `localhost`, through forwarded ports.
 - **One entry point:** `install.sh` does all the setup inside a VM. Vagrant runs it for you; on a VPS you run it yourself.
 
@@ -71,6 +71,22 @@ ls -la /srv/project                     # owned by dev, group project
 sudo -u dev git -C /srv/project status  # a clean working tree
 ```
 
+## Using the editor
+
+Open `http://localhost:8080` in Chrome or Firefox (or the `ports.editor` you chose) and log in.
+
+The password is printed once, when the machine is first set up. To look it up again:
+
+```bash
+vagrant ssh my-project -c "sudo grep password: /home/dev/.config/code-server/config.yaml"
+```
+
+The editor runs as the `dev` user and opens your project in `/srv/project`. Its built-in terminal is a shell as `dev`, for git, npm and tests. Use the Source Control view to review changes and commit.
+
+Claude Code isn't run from the editor. You'll start it from a terminal on your computer, through `vagrant ssh`, once that step is built.
+
+Safari on older macOS versions can struggle with the editor; a current Chrome or Firefox works best.
+
 ## Everyday commands
 
 ```bash
@@ -95,6 +111,7 @@ Each `machines/<name>.json` file supports:
 | `vm.memory` / `vm.cpus` | 3072 / 2 | VM resources, in MB / cores |
 | `ports.editor` / `ports.app` | 8080 / 5173 | Ports on your computer's `localhost`; each machine needs its own |
 | `node` | 24 | Node.js major version |
+| `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry |
 
 Gleipnir refuses to start if two machines use the same port, and tells you which.
 
