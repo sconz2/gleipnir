@@ -13,7 +13,7 @@ In Norse myth, Gleipnir was the binding that held the giant wolf Fenrir: as thin
 - A browser-based editor (code-server)
 - The dev server, running in the background
 - Claude Code as a restricted user, with a firewall, managed settings and change checks
-- Claude's work kept on `wip/` branches for you to review, merge and push
+- Claude's work kept on `wip/` branches, committed only when you say, for you to merge and push
 - Optional PostgreSQL, reachable from your computer
 - Optional Playwright browsers
 
@@ -182,7 +182,9 @@ The `claude` command:
 
 ### Reviewing and merging Claude's work
 
-Claude commits as it goes on its `wip/` branch, and anything left over is saved as a "Checkpoint" commit at the end of each turn. Claude can't commit to `main`, and never pushes. In the editor's terminal:
+Claude doesn't commit on its own. When it finishes a request, it summarises the changes, shows the commit message it would use, and asks. Review the changes in the editor's Source Control view, then tell Claude to commit (or ask for changes first). Its commits go on the `wip/` branch; it can't commit to `main`, and never pushes.
+
+When you're happy with the branch, merge it in the editor's terminal:
 
 ```bash
 git diff main...wip/2026-10-25        # everything on the branch
@@ -242,7 +244,7 @@ Each `machines/<name>.json` file supports:
 | `postgres.databases` | none | Databases to create, owned by that user |
 | `claude.network` | `allowlist` | `allowlist`, or `open` to let Claude reach any site |
 | `claude.allowed_domains` | none | Extra sites Claude may reach, by exact name |
-| `claude.autocommit` | `true` | Claude works and commits on a `wip/` branch |
+| `claude.wip_branch` | `true` | Claude works on a `wip/` branch, and commits there only when you say. (Formerly `claude.autocommit`, which still works) |
 | `claude.checks` | `true` | Heimdall's change checks |
 
 Gleipnir refuses to start if two machines use the same port, and tells you which.

@@ -12,7 +12,8 @@ USER_DIR="$DEV_HOME/.local/share/code-server/User"
 # --- Install, or update to the latest release ------------------------------------
 log "Installing code-server"
 curl -fsSL https://code-server.dev/install.sh | sh >/dev/null
-log "$(code-server --version | head -n 1)"
+rm -rf /root/.config/code-server   # left by older versions of this step; never used
+log "$(sudo -u dev -H code-server --version 2>/dev/null | head -n 1)"
 
 # --- Where it listens ---------------------------------------------------------------
 if id vagrant >/dev/null 2>&1; then

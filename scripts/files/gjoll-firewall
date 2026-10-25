@@ -9,7 +9,7 @@
 #   gjoll-firewall --rebuild   remove and re-create the rules
 #   gjoll-firewall --remove    remove the rules
 #   gjoll-firewall --check     exit 0 only if the rules are in place
-#   gjoll-firewall --verify    apply, then test that blocking works
+#   gjoll-firewall --verify    apply if missing, then test that blocking works
 set -uo pipefail
 
 USER_NAME=claude
@@ -127,6 +127,6 @@ case "${1:-}" in
   --rebuild) remove_rules; build_rules; refresh_allowlist ;;
   --remove)  remove_rules; echo "Gjöll: removed" ;;
   --check)   rules_present ;;
-  --verify)  rules_present || build_rules; refresh_allowlist; verify ;;
+  --verify)  rules_present || { build_rules; refresh_allowlist; }; verify ;;
   *)         echo "usage: $0 [--rebuild|--remove|--check|--verify]" >&2; exit 2 ;;
 esac

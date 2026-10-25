@@ -11,7 +11,8 @@ FILES="$GLEIPNIR_SRC/scripts/files"
 
 NETWORK="$(cfg claude.network allowlist)"
 CHECKS="$(cfg claude.checks true)"
-AUTOCOMMIT="$(cfg claude.autocommit true)"
+# claude.wip_branch was called claude.autocommit; the old name still works
+WIP_BRANCH="$(cfg claude.wip_branch "$(cfg claude.autocommit true)")"
 PLAYWRIGHT="$(cfg playwright.enabled false)"
 case "$NETWORK" in
   allowlist|open) ;;
@@ -49,22 +50,22 @@ chmod 0644 /home/claude/.npmrc
 # --- Helpers ---------------------------------------------------------------------
 install -m 0755 "$FILES/claude-launcher" /usr/local/bin/claude
 install -m 0755 "$FILES/heimdall-check" /usr/local/bin/heimdall-check
-install -m 0755 "$FILES/gleipnir-checkpoint" /usr/local/bin/gleipnir-checkpoint
+rm -f /usr/local/bin/gleipnir-checkpoint   # no longer used: Claude commits only when you say
 install -m 0755 "$FILES/gjoll-firewall" /usr/local/sbin/gjoll-firewall
 install -d -m 0755 /etc/gleipnir/git-hooks
 install -m 0755 "$FILES/pre-commit" /etc/gleipnir/git-hooks/pre-commit
 
 printf '%s\n' "$NETWORK" > /etc/gleipnir/claude-network
 if [ "$CHECKS" = "true" ]; then touch /etc/gleipnir/heimdall; else rm -f /etc/gleipnir/heimdall; fi
-if [ "$AUTOCOMMIT" = "true" ]; then touch /etc/gleipnir/claude-autocommit; else rm -f /etc/gleipnir/claude-autocommit; fi
+if [ "$WIP_BRANCH" = "true" ]; then touch /etc/gleipnir/claude-autocommit; else rm -f /etc/gleipnir/claude-autocommit; fi
 
 # --- Týr: managed settings ---------------------------------------------------------
 # /etc/claude-code is owned by root: Claude reads these but can't change them,
 # and they take priority over any user or project settings.
 install -d -m 0755 /etc/claude-code
-python3 -I - "$CHECKS" "$AUTOCOMMIT" > /etc/claude-code/managed-settings.json <<'PY'
+python3 -I - "$CHECKS" > /etc/claude-code/managed-settings.json <<'PY'
 import json, sys
-checks, autocommit = sys.argv[1] == "true", sys.argv[2] == "true"
+checks = sys.argv[1] == "true"
 
 env_files = [".env", ".env.local", ".env.*.local", ".env.development", ".env.production", ".env.test"]
 settings = {
@@ -76,18 +77,11 @@ settings = {
 def hook(command):
     return {"type": "command", "command": command, "timeout": 60}
 
-hooks = {}
 if checks:
-    hooks["SessionStart"] = [{"hooks": [hook("/usr/local/bin/heimdall-check --hook-start")]}]
-stop = []
-if autocommit:
-    stop.append(hook("/usr/local/bin/gleipnir-checkpoint"))
-if checks:
-    stop.append(hook("/usr/local/bin/heimdall-check --hook"))
-if stop:
-    hooks["Stop"] = [{"hooks": stop}]
-if hooks:
-    settings["hooks"] = hooks
+    settings["hooks"] = {
+        "SessionStart": [{"hooks": [hook("/usr/local/bin/heimdall-check --hook-start")]}],
+        "Stop": [{"hooks": [hook("/usr/local/bin/heimdall-check --hook")]}],
+    }
 
 json.dump(settings, sys.stdout, indent=2)
 print()
@@ -114,13 +108,25 @@ EOF
   if [ "$PLAYWRIGHT" = "true" ]; then
     echo "- Playwright's browsers are installed in /opt/playwright. Don't run \`playwright install\`; if a browser is missing, say so."
   fi
-  if [ "$AUTOCOMMIT" = "true" ]; then
+  if [ "$WIP_BRANCH" = "true" ]; then
     cat <<'EOF'
 
 ## Git
 
 - Work on the current `wip/` branch. Never commit to `main`, and never push.
-- Commit after each logical step, with a clear message that says what changed and why.
+- Never commit on your own. When you've finished a request, stop and:
+  1. Summarise what you changed.
+  2. Show the commit message you'd use: a short subject line, then a few lines on what changed and why.
+  3. Ask whether to commit.
+- Only commit when the user tells you to, using that message or their edited version. If they ask for more changes first, make them, then show an updated message and ask again.
+- Don't add Co-Authored-By lines or any other attribution to commit messages.
+EOF
+  else
+    cat <<'EOF'
+
+## Git
+
+- Never commit or push on your own. When you've finished a request, summarise what you changed and suggest a commit message.
 - Don't add Co-Authored-By lines or any other attribution to commit messages.
 EOF
   fi
@@ -164,7 +170,6 @@ systemctl daemon-reload
 systemctl enable gjoll-firewall.service >/dev/null 2>&1
 systemctl enable --now gjoll-firewall.timer >/dev/null 2>&1
 /usr/local/sbin/gjoll-firewall --rebuild
-
 /usr/local/sbin/gjoll-firewall --verify || fail "Gjöll didn't verify; Claude would not be contained"
 if [ "$NETWORK" = "open" ]; then
   warn "claude.network is \"open\": Claude can reach any site. Its connections are logged (sudo journalctl -k | grep gjoll)."
