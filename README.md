@@ -84,13 +84,7 @@ sudo -u dev git -C /srv/project status  # a clean working tree
 
 ## Using the editor
 
-Open `http://localhost:8080` in Chrome or Firefox (or the `ports.editor` you chose) and log in.
-
-The password is printed once, when the machine is first set up. To look it up again:
-
-```bash
-vagrant ssh my-project -c "sudo grep password: /home/dev/.config/code-server/config.yaml"
-```
+Open `http://localhost:8080` in Chrome or Firefox (or the `ports.editor` you chose). There's no password: only your computer can reach that port, and Gjöll stops Claude connecting to the editor from inside the machine.
 
 The editor runs as the `dev` user and opens your project in `/srv/project`. Its built-in terminal is a shell as `dev`, for git, npm and tests. Use the Source Control view to review changes and commit.
 
@@ -200,9 +194,9 @@ git branch -D wip/2026-10-25
 
 ### What holds Claude in place
 
-- **The `claude` user** has no `sudo` and can't read `dev`'s home, so your git key and editor password are out of its reach.
+- **The `claude` user** has no `sudo` and can't read `dev`'s home, so your git key is out of its reach.
 - **Týr**, the managed settings in `/etc/claude-code/`, are owned by root and override any user or project settings. They block Claude's file tools from `.env` files, turn off non-essential traffic, and run Heimdall's checks. Claude also gets a root-owned `CLAUDE.md` describing the machine and its git rules.
-- **Gjöll** limits the `claude` user to Anthropic, the npm registry and the sites you list in `claude.allowed_domains`. Nothing else in the machine is restricted. It refreshes the sites' addresses every 30 minutes.
+- **Gjöll** limits the `claude` user to Anthropic, the npm registry and the sites you list in `claude.allowed_domains`. Nothing else in the machine is restricted. It refreshes the sites' addresses every 30 minutes. It also stops Claude connecting to the editor, which has no password and would otherwise give it a terminal as `dev`. Claude won't start if Gjöll isn't in place.
 - **Heimdall** flags changes to package scripts, tool configs and shell scripts, npm package changes (watch for look-alike names), and new git hooks or settings that run commands: after each turn, and in a summary when you exit.
 - **npm install scripts** are off for the `claude` user.
 

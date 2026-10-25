@@ -23,24 +23,15 @@ else
   bind="127.0.0.1:8080"
 fi
 
-# --- Config, keeping the existing password -----------------------------------------
+# --- Config ------------------------------------------------------------------------------
+# No password. Only your computer can reach the forwarded port, and inside the machine
+# Gjöll stops the claude user connecting to the editor (see 08-claude.sh). Without that
+# block, Claude could use the editor's terminal to act as dev.
 install -d -o dev -g dev -m 0700 "$DEV_HOME/.config" "$CONF_DIR"
 
-password=""
-new_password=0
-if [ -f "$CONF" ]; then
-  password="$(sed -n 's/^password: *//p' "$CONF")"
-fi
-if [ -z "$password" ]; then
-  password="$(python3 -I -c 'import secrets; print(secrets.token_urlsafe(18))')"
-  new_password=1
-fi
-
-# dev's home is private, so the claude user can't read this password
 cat > "$CONF" <<EOF
 bind-addr: $bind
-auth: password
-password: $password
+auth: none
 cert: false
 disable-telemetry: true
 disable-update-check: true
@@ -97,12 +88,3 @@ if ! curl -fs -o /dev/null http://127.0.0.1:8080/healthz; then
   fail "code-server didn't start. See: sudo journalctl -u code-server@dev"
 fi
 log "Editor running"
-
-if [ "$new_password" -eq 1 ]; then
-  echo
-  echo "    ------------------------------------------------------------"
-  echo "    Editor password: $password"
-  echo "    (shown once; see the README for how to look it up again)"
-  echo "    ------------------------------------------------------------"
-  echo
-fi

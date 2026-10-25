@@ -2,6 +2,9 @@
 # Gleipnir: Gjöll, the firewall for the claude user only. Everything else in the
 # machine (provisioning, npm installs as dev, the dev server) is unaffected.
 #
+# In every mode, claude can't connect to the editor (port 8080), which has no
+# password and would otherwise give it a terminal as dev.
+#
 #   gjoll-firewall             apply the rules if missing, refresh the allowlist
 #   gjoll-firewall --rebuild   remove and re-create the rules
 #   gjoll-firewall --remove    remove the rules
@@ -14,6 +17,7 @@ CHAIN=GJOLL
 SET=gjoll-allowed
 SET_NEW=gjoll-allowed-new
 DOMAINS=/etc/gleipnir/allowed-domains
+EDITOR_PORT=8080
 MODE="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
 
 jump_present() {
@@ -24,6 +28,7 @@ rules_present() {
   local ipt
   for ipt in iptables ip6tables; do
     jump_present "$ipt" || return 1
+    "$ipt" -C "$CHAIN" -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset >/dev/null 2>&1 || return 1
     if [ "$MODE" = "open" ]; then
       "$ipt" -C "$CHAIN" -j ACCEPT >/dev/null 2>&1 || return 1
     else
@@ -49,6 +54,7 @@ build_rules() {
   ipset create "$SET" hash:net -exist
   for ipt in iptables ip6tables; do
     "$ipt" -N "$CHAIN" 2>/dev/null || "$ipt" -F "$CHAIN"
+    "$ipt" -A "$CHAIN" -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset
     "$ipt" -A "$CHAIN" -o lo -j ACCEPT
     "$ipt" -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     if [ "$MODE" = "open" ]; then
@@ -98,6 +104,14 @@ refresh_allowlist() {
 }
 
 verify() {
+  if sudo -u "$USER_NAME" curl -s --max-time 5 -o /dev/null "http://127.0.0.1:$EDITOR_PORT/healthz"; then
+    echo "Gjöll: ERROR: the claude user can reach the editor, so the firewall isn't working" >&2
+    return 1
+  fi
+  if [ "$MODE" = "open" ]; then
+    echo "Gjöll: verified (editor blocked; open network)"
+    return 0
+  fi
   if sudo -u "$USER_NAME" curl -s --max-time 5 -o /dev/null https://example.com; then
     echo "Gjöll: ERROR: the claude user can reach example.com, so the firewall isn't working" >&2
     return 1

@@ -16,9 +16,8 @@ if ! sudo -n true 2>/dev/null; then
   exit 1
 fi
 
-# Gjöll must be up before Claude starts
-network="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
-if [ "$network" = "allowlist" ] && ! sudo -n /usr/local/sbin/gjoll-firewall --check; then
+# Gjöll must be up before Claude starts. In open mode it still keeps Claude out of the editor.
+if ! sudo -n /usr/local/sbin/gjoll-firewall --check; then
   echo "Gleipnir: the firewall (Gjöll) isn't active, so Claude wasn't started." >&2
   echo "Start it with: sudo systemctl start gjoll-firewall" >&2
   exit 1
