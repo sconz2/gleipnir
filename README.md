@@ -15,7 +15,7 @@ Work in progress. Built so far:
 - [x] Claude Code with its firewall, managed settings and change checks
 - [x] Optional PostgreSQL, and copying in your `.env`
 - [x] The dev server
-- [ ] Optional Playwright
+- [x] Optional Playwright
 - [ ] Running on a VPS
 
 ## How it works
@@ -116,6 +116,15 @@ devserver log -f     # follow its output (Ctrl+C to stop)
 ```
 
 Claude can read its output, to check for build errors, but can't start or stop it.
+
+## Playwright
+
+With `playwright.enabled` set to `true`, the machine installs Playwright's browsers (Chromium by default) and the system libraries they need. Your tests, and Claude, can then run them with `npx playwright test`.
+
+- **The browsers match your project's Playwright version.** After upgrading Playwright in the project, run `vagrant provision my-project` to install the matching browsers.
+- **They're shared and read-only**, in `/opt/playwright`. Both `dev` and `claude` use them, and neither can change them, so don't run `npx playwright install`; provisioning does it.
+- **They run headless**, since the machine has no screen. To see a test report, run `npx playwright show-report` in the editor's terminal, then open `http://localhost:8080/proxy/9323/` (the editor passes it through).
+- **Reuse the dev server.** It's already running on port 5173, so in `playwright.config` point `webServer.url` at `http://localhost:5173` with `reuseExistingServer: true`, or leave `webServer` out.
 
 ## The database
 
@@ -229,6 +238,8 @@ Each `machines/<name>.json` file supports:
 | `node` | 24 | Node.js major version |
 | `devserver.enabled` | `true` | Run the dev server in the background |
 | `devserver.command` | `npm run dev` on port 5173 | The command that starts it; it must listen on `0.0.0.0:5173` |
+| `playwright.enabled` | `false` | Install Playwright's browsers |
+| `playwright.browsers` | `["chromium"]` | Which browsers: `chromium`, `firefox`, `webkit` |
 | `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry |
 | `postgres.enabled` | `false` | Install PostgreSQL |
 | `postgres.version` | 18 | PostgreSQL major version |

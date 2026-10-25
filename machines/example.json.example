@@ -5,6 +5,7 @@
   "ports": { "editor": 8080, "app": 5173, "db": 54320 },
   "node": 24,
   "devserver": { "enabled": true },
+  "playwright": { "enabled": false, "browsers": ["chromium"] },
   "postgres": {
     "enabled": false,
     "version": 18,
