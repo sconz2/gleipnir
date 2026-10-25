@@ -17,6 +17,13 @@ require 'json'
 
 root = File.expand_path(__dir__)
 
+# A bare `vagrant destroy` would destroy every machine, and each one holds the only
+# copy of its unpushed work and its database. Make it name the machines it destroys.
+words = ARGV.reject { |arg| arg.start_with?('-') }
+if words.first == 'destroy' && words.size == 1
+  abort 'Gleipnir: name the machine to destroy, e.g. vagrant destroy my-project'
+end
+
 # Where each VM receives the scripts, config, key and .env: a folder only vagrant can read
 upload = '/home/vagrant/.gleipnir'
 

@@ -243,7 +243,7 @@ Gleipnir refuses to start if two machines use the same port, and tells you which
 
 ## Important: your work lives in the VM
 
-The project isn't on your computer. Until you push, the only copy of your work is inside its VM, and `vagrant destroy` deletes it. Push often. The database lives in the VM too, so `vagrant destroy` deletes its data as well.
+The project isn't on your computer. Until you push, the only copy of your work is inside its VM, and `vagrant destroy` deletes it. Push often. The database lives in the VM too, so `vagrant destroy` deletes its data as well. Gleipnir makes you name the machine (`vagrant destroy my-project`), so a bare `vagrant destroy` can't wipe every machine at once.
 
 ## Known gaps
 
