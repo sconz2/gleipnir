@@ -53,7 +53,13 @@ if [ -n "$git_email" ]; then sudo -u dev -H git config --global user.email "$git
 
 # --- The project folder -------------------------------------------------------
 install -d -o dev -g project -m 2775 "$DEST"
-git config --system --replace-all safe.directory "$DEST"
+# Only dev (the owner) and claude may run git in the project. Git refuses
+# everyone else, including the admin user, so a hook or setting planted in
+# .git can never run with admin rights.
+git config --system --unset-all safe.directory 2>/dev/null || true
+if ! sudo -u claude -H git config --global --get-all safe.directory 2>/dev/null | grep -qx "$DEST"; then
+  sudo -u claude -H git config --global --add safe.directory "$DEST"
+fi
 
 if [ ! -d "$DEST/.git" ]; then
   if [ -n "$(ls -A "$DEST")" ]; then
