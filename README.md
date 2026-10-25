@@ -6,17 +6,16 @@ A Vagrant VM for running Claude Code safely: the project lives inside the VM, Cl
 
 In Norse myth, Gleipnir was the binding that held the giant wolf Fenrir: as thin as a silk ribbon, but impossible to break. Its parts are named from the same story: **Gjöll** is the firewall, **Heimdall** the change checks and **Týr** the managed settings.
 
-## Status
+## What's in it
 
-Work in progress. Built so far:
-
-- [x] The VMs, users, Node.js and cloning your project
-- [x] The browser editor (code-server)
-- [x] Claude Code with its firewall, managed settings and change checks
-- [x] Optional PostgreSQL, and copying in your `.env`
-- [x] The dev server
-- [x] Optional Playwright
-- [ ] Running on a VPS
+- One VM per project, each with its own config, deploy key and `.env`
+- Your project cloned onto the VM's disk, with Node.js and its npm packages
+- A browser-based editor (code-server)
+- The dev server, running in the background
+- Claude Code as a restricted user, with a firewall, managed settings and change checks
+- Claude's work kept on `wip/` branches for you to review, merge and push
+- Optional PostgreSQL, reachable from your computer
+- Optional Playwright browsers
 
 ## How it works
 
@@ -25,7 +24,7 @@ Work in progress. Built so far:
 - **Your project lives on the VM's own disk**, cloned from its git repo, not shared from your computer. That keeps it fast and keeps project code off your machine.
 - **Two working users per VM, neither with `sudo`:** `dev` for your daily work (the editor, git, the dev server) and `claude` for Claude Code, which you start from your own terminal through `vagrant ssh`. They share the project through a `project` group.
 - **Your computer only runs a browser.** Each VM's editor, app and database are reached on your own `localhost`, through forwarded ports.
-- **One entry point:** `install.sh` does all the setup inside a VM. Vagrant runs it for you; on a VPS you run it yourself.
+- **One entry point:** `install.sh` does all the setup inside a VM, and Vagrant runs it for you.
 
 ## Requirements
 
@@ -80,6 +79,8 @@ id dev; id claude                       # both in group "project", neither in su
 node -v                                 # the version from the config
 ls -la /srv/project                     # owned by dev, group project
 sudo -u dev git -C /srv/project status  # a clean working tree
+devserver                               # the dev server: active (running)
+sudo -u claude curl -s --max-time 3 http://127.0.0.1:8080 || echo blocked   # Claude can't reach the editor
 ```
 
 ## Using the editor

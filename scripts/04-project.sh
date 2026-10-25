@@ -85,7 +85,7 @@ fi
 
 # --- npm packages, on first setup ---------------------------------------------
 if [ -f "$DEST/package.json" ] && [ ! -d "$DEST/node_modules" ]; then
-    if [ -f "$DEST/package-lock.json" ]; then install_cmd="npm ci"; else install_cmd="npm install"; fi
+  if [ -f "$DEST/package-lock.json" ]; then install_cmd="npm ci"; else install_cmd="npm install"; fi
   log "Installing npm packages ($install_cmd)"
   sudo -u dev -H bash -c "cd '$DEST' && $install_cmd"
 fi

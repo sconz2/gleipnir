@@ -12,6 +12,7 @@ FILES="$GLEIPNIR_SRC/scripts/files"
 NETWORK="$(cfg claude.network allowlist)"
 CHECKS="$(cfg claude.checks true)"
 AUTOCOMMIT="$(cfg claude.autocommit true)"
+PLAYWRIGHT="$(cfg playwright.enabled false)"
 case "$NETWORK" in
   allowlist|open) ;;
   *) fail "claude.network must be \"allowlist\" or \"open\"" ;;
@@ -93,7 +94,8 @@ print()
 PY
 chmod 0644 /etc/claude-code/managed-settings.json
 
-# Instructions Claude reads at the start of every session, also owned by root
+# Instructions Claude reads at the start of every session, also owned by root.
+# 09-devserver.sh adds a section about the dev server after this.
 {
   cat <<'EOF'
 # Gleipnir environment
@@ -102,9 +104,16 @@ You're running inside a Gleipnir VM, as the `claude` user.
 
 - The project is in /srv/project. You have no sudo.
 - The dev server, if one is running, belongs to the `dev` user. Don't start or restart it.
-- Your network access is limited to an allowlist. If you need a site that isn't reachable, say so rather than working around it.
-- Don't run `playwright install`; browsers are installed by Gleipnir.
+- The editor on port 8080 belongs to the user, and you can't connect to it.
 EOF
+  if [ "$NETWORK" = "allowlist" ]; then
+    echo "- Your network access is limited to an allowlist. If you need a site that isn't reachable, say so rather than working around it."
+  else
+    echo "- Your network connections are logged."
+  fi
+  if [ "$PLAYWRIGHT" = "true" ]; then
+    echo "- Playwright's browsers are installed in /opt/playwright. Don't run \`playwright install\`; if a browser is missing, say so."
+  fi
   if [ "$AUTOCOMMIT" = "true" ]; then
     cat <<'EOF'
 
@@ -156,9 +165,8 @@ systemctl enable gjoll-firewall.service >/dev/null 2>&1
 systemctl enable --now gjoll-firewall.timer >/dev/null 2>&1
 /usr/local/sbin/gjoll-firewall --rebuild
 
-if [ "$NETWORK" = "allowlist" ]; then
-  /usr/local/sbin/gjoll-firewall --verify
-else
+/usr/local/sbin/gjoll-firewall --verify || fail "Gjöll didn't verify; Claude would not be contained"
+if [ "$NETWORK" = "open" ]; then
   warn "claude.network is \"open\": Claude can reach any site. Its connections are logged (sudo journalctl -k | grep gjoll)."
 fi
 
