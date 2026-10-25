@@ -6,6 +6,10 @@
 # Each file in machines/ defines one VM, named after the file:
 #   machines/my-project.json  ->  vagrant up my-project
 #
+# Its other files are found by the same name, unless its config points elsewhere:
+#   keys/my-project      the repo's deploy key (needed for SSH repo URLs), or "deploy_key"
+#   env/my-project.env   the project's .env (optional), or "env_file"
+#
 # This file only creates the VMs and hands over to install.sh, which does the
 # real work and is the same entry point used on a VPS.
 
@@ -33,17 +37,28 @@ machines = Dir.glob(File.join(root, 'machines', '*.json')).sort.map do |file|
 
   abort "Gleipnir: #{where}: \"repo\" is required." if settings['repo'].to_s.strip.empty?
 
-  key = nil
-  if settings['deploy_key']
-    key = File.expand_path(settings['deploy_key'], root)
-    abort "Gleipnir: #{where}: deploy key not found at #{key}." unless File.exist?(key)
+  # A machine's other files: the path its config gives (relative to this folder),
+  # otherwise the default named after the machine. A path the config gives must exist.
+  find = lambda do |setting, default|
+    if settings[setting]
+      path = File.expand_path(settings[setting], root)
+      abort "Gleipnir: #{where}: #{setting} not found at #{path}." unless File.file?(path)
+      path
+    else
+      path = File.join(root, default)
+      File.file?(path) ? path : nil
+    end
   end
 
-  env_file = nil
-  if settings['env_file']
-    env_file = File.expand_path(settings['env_file'], root)
-    abort "Gleipnir: #{where}: env file not found at #{env_file}." unless File.exist?(env_file)
+  # The deploy key: keys/<name>. SSH repo URLs can't be cloned without one.
+  key = find.call('deploy_key', "keys/#{name}")
+  if key.nil? && settings['repo'].match?(%r{\A(ssh://|[^/@:]+@[^:]+:)})
+    abort "Gleipnir: #{where}: no deploy key at keys/#{name}. Create one with:\n" \
+          "  ssh-keygen -t ed25519 -f keys/#{name} -C \"#{name} VM\" -N \"\""
   end
+
+  # The project's .env: env/<name>.env, if there is one
+  env_file = find.call('env_file', "env/#{name}.env")
 
   ports = settings['ports'] || {}
   postgres = settings['postgres'] || {}
