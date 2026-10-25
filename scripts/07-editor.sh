@@ -47,20 +47,36 @@ ExecStart=
 ExecStart=/usr/bin/code-server /srv/project
 EOF
 
-# --- Editor settings, on first setup only (yours to change after that) ---------------
+# --- Editor settings ---------------------------------------------------------------------
+# Gleipnir's defaults are added only where a setting isn't there yet, so anything you've
+# changed in the editor is kept. A settings file with comments in it is left alone.
 install -d -o dev -g dev "$DEV_HOME/.local" "$DEV_HOME/.local/share" \
   "$DEV_HOME/.local/share/code-server" "$USER_DIR"
-if [ ! -f "$USER_DIR/settings.json" ]; then
-  cat > "$USER_DIR/settings.json" <<'EOF'
-{
-  "workbench.startupEditor": "none",
-  "terminal.integrated.cwd": "/srv/project",
-  "telemetry.telemetryLevel": "off",
-  "git.autofetch": false
+sudo -u dev python3 -I - "$USER_DIR/settings.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+defaults = {
+    "workbench.colorTheme": "Dark 2026",
+    "workbench.startupEditor": "none",
+    "terminal.integrated.cwd": "/srv/project",
+    "telemetry.telemetryLevel": "off",
+    "git.autofetch": False,
 }
-EOF
-  chown dev:dev "$USER_DIR/settings.json"
-fi
+settings = {}
+if os.path.exists(path):
+    try:
+        with open(path) as fh:
+            settings = json.load(fh)
+    except ValueError:
+        print("    WARNING: the editor's settings.json has comments or isn't plain JSON; left unchanged", file=sys.stderr)
+        sys.exit(0)
+missing = {key: value for key, value in defaults.items() if key not in settings}
+if missing:
+    settings.update(missing)
+    with open(path, "w") as fh:
+        json.dump(settings, fh, indent=2)
+        fh.write("\n")
+PY
 
 # --- Extensions, from the Open VSX registry ------------------------------------------
 mapfile -t extensions < <(cfg extensions "")
