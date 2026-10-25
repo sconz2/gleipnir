@@ -1,2 +1,8 @@
 /.vagrant
-/config.json
+
+# Your machine configs and deploy keys stay on your computer
+/machines/*.json
+/keys/*
+!/keys/.gitkeep
+
+.DS_Store
