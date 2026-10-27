@@ -130,6 +130,7 @@ Vagrant.configure('2') do |config|
         inline: "rm -rf #{upload} && install -d -m 0700 -o vagrant -g vagrant #{upload}"
       machine.vm.provision 'file', source: File.join(root, 'install.sh'), destination: "#{upload}/install.sh"
       machine.vm.provision 'file', source: File.join(root, 'scripts'), destination: "#{upload}/scripts"
+      machine.vm.provision 'file', source: File.join(root, 'claude-instructions.md'), destination: "#{upload}/claude-instructions.md"
       machine.vm.provision 'file', source: m[:file], destination: "#{upload}/config.json"
       machine.vm.provision 'file', source: m[:key], destination: "#{upload}/deploy_key" if m[:key]
       machine.vm.provision 'file', source: m[:env_file], destination: "#{upload}/env" if m[:env_file]

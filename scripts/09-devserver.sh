@@ -9,6 +9,7 @@ DEST=/srv/project
 UNIT=gleipnir-dev.service
 UNIT_FILE=/etc/systemd/user/$UNIT
 RUN=/etc/gleipnir/devserver-run
+COMMAND_FILE=/etc/gleipnir/devserver-command   # read by 10-claude-md.sh
 LOG_DIR=/var/log/gleipnir
 DEV_UID="$(id -u dev)"
 
@@ -18,6 +19,7 @@ as_dev_systemctl() {
 }
 
 install -m 0755 "$GLEIPNIR_SRC/scripts/files/devserver" /usr/local/bin/devserver
+rm -f "$COMMAND_FILE"   # written again below if the dev server is set up
 
 # --- Turned off: stop it and remove it ----------------------------------------------
 if [ "$(cfg devserver.enabled true)" != "true" ]; then
@@ -109,18 +111,7 @@ as_dev_systemctl enable "$UNIT" >/dev/null 2>&1
 as_dev_systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
 as_dev_systemctl restart "$UNIT"
 
-# --- Tell Claude where to look ---------------------------------------------------------------
-# 08-claude.sh writes this file fresh on every provision; this adds to it.
-if [ -f /etc/claude-code/CLAUDE.md ]; then
-  cat >> /etc/claude-code/CLAUDE.md <<EOF
-
-## Dev server
-
-- It runs \`$COMMAND\` as the \`dev\` user, on port 5173, and reloads as you edit.
-- Its output is in $LOG_DIR/devserver.log (\`devserver log\` shows the end of it). Read it to check for build errors.
-- If it needs restarting (after a dependency or config change), ask the user to run \`devserver restart\`.
-EOF
-fi
+printf '%s\n' "$COMMAND" > "$COMMAND_FILE"
 
 # --- Check it came up ---------------------------------------------------------------------------
 for _ in $(seq 1 30); do

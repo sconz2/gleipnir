@@ -13,7 +13,6 @@ NETWORK="$(cfg claude.network allowlist)"
 CHECKS="$(cfg claude.checks true)"
 # claude.wip_branch was called claude.autocommit; the old name still works
 WIP_BRANCH="$(cfg claude.wip_branch "$(cfg claude.autocommit true)")"
-PLAYWRIGHT="$(cfg playwright.enabled false)"
 case "$NETWORK" in
   allowlist|open) ;;
   *) fail "claude.network must be \"allowlist\" or \"open\"" ;;
@@ -87,51 +86,7 @@ json.dump(settings, sys.stdout, indent=2)
 print()
 PY
 chmod 0644 /etc/claude-code/managed-settings.json
-
-# Instructions Claude reads at the start of every session, also owned by root.
-# 09-devserver.sh adds a section about the dev server after this.
-{
-  cat <<'EOF'
-# Gleipnir environment
-
-You're running inside a Gleipnir VM, as the `claude` user.
-
-- The project is in /srv/project. You have no sudo.
-- The dev server, if one is running, belongs to the `dev` user. Don't start or restart it.
-- The editor on port 8080 belongs to the user, and you can't connect to it.
-EOF
-  if [ "$NETWORK" = "allowlist" ]; then
-    echo "- Your network access is limited to an allowlist. If you need a site that isn't reachable, say so rather than working around it."
-  else
-    echo "- Your network connections are logged."
-  fi
-  if [ "$PLAYWRIGHT" = "true" ]; then
-    echo "- Playwright's browsers are installed in /opt/playwright. Don't run \`playwright install\`; if a browser is missing, say so."
-  fi
-  if [ "$WIP_BRANCH" = "true" ]; then
-    cat <<'EOF'
-
-## Git
-
-- Work on the current `wip/` branch. Never commit to `main`, and never push.
-- Never commit on your own. When you've finished a request, stop and:
-  1. Summarise what you changed.
-  2. Show the commit message you'd use: a short subject line, then a few lines on what changed and why.
-  3. Ask whether to commit.
-- Only commit when the user tells you to, using that message or their edited version. If they ask for more changes first, make them, then show an updated message and ask again.
-- Don't add Co-Authored-By lines or any other attribution to commit messages.
-EOF
-  else
-    cat <<'EOF'
-
-## Git
-
-- Never commit or push on your own. When you've finished a request, summarise what you changed and suggest a commit message.
-- Don't add Co-Authored-By lines or any other attribution to commit messages.
-EOF
-  fi
-} > /etc/claude-code/CLAUDE.md
-chmod 0644 /etc/claude-code/CLAUDE.md
+# Claude's instructions, /etc/claude-code/CLAUDE.md, are written by 10-claude-md.sh
 
 # --- Gjöll: the firewall for the claude user ------------------------------------
 {

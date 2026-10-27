@@ -195,10 +195,22 @@ git push
 git branch -D wip/2026-10-25
 ```
 
+### Claude's instructions
+
+`claude-instructions.md`, in the Gleipnir folder, is what Claude is told at the start of every session: how the machine works, and the git rules above. Edit it there, then run `vagrant provision my-project`; every machine gets your version on its next provision, as a root-owned `/etc/claude-code/CLAUDE.md` that Claude can't change.
+
+Sections wrapped in `{{if ...}}` and `{{end}}` only appear on machines they apply to, such as the Playwright note when `playwright.enabled` is on. The comment at the top of the file lists them. To check what a machine's Claude actually gets:
+
+```bash
+vagrant ssh my-project -c "cat /etc/claude-code/CLAUDE.md"
+```
+
+A project can also have its own `CLAUDE.md` in its repo, for notes about that project. Claude reads both.
+
 ### What holds Claude in place
 
 - **The `claude` user** has no `sudo` and can't read `dev`'s home, so your git key is out of its reach.
-- **Týr**, the managed settings in `/etc/claude-code/`, are owned by root and override any user or project settings. They block Claude's file tools from `.env` files, turn off non-essential traffic, and run Heimdall's checks. Claude also gets a root-owned `CLAUDE.md` describing the machine and its git rules.
+- **Týr**, the managed settings in `/etc/claude-code/`, are owned by root and override any user or project settings. They block Claude's file tools from `.env` files, turn off non-essential traffic, and run Heimdall's checks. Claude also gets a root-owned `CLAUDE.md` made from `claude-instructions.md` (see above).
 - **Gjöll** limits the `claude` user to Anthropic, the npm registry and the sites you list in `claude.allowed_domains`. Nothing else in the machine is restricted. It refreshes the sites' addresses every 30 minutes. It also stops Claude connecting to the editor, which has no password and would otherwise give it a terminal as `dev`. Claude won't start if Gjöll isn't in place.
 - **Heimdall** flags changes to package scripts, tool configs and shell scripts, npm package changes (watch for look-alike names), and new git hooks or settings that run commands: after each turn, and in a summary when you exit.
 - **npm install scripts** are off for the `claude` user.
