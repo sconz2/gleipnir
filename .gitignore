@@ -1,10 +1,15 @@
 /.vagrant
 
-# Your machine configs, deploy keys and .env files stay on your computer
+# Your machine configs, deploy keys, .env files, starter CLAUDE.md files and
+# project context stay on your computer
 /machines/*.json
 /keys/*
 !/keys/.gitkeep
 /env/*
 !/env/.gitkeep
+/claude/*
+!/claude/example.md.example
+/context/*
+!/context/.gitkeep
 
 .DS_Store

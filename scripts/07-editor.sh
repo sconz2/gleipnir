@@ -13,7 +13,7 @@ USER_DIR="$DEV_HOME/.local/share/code-server/User"
 log "Installing code-server"
 curl -fsSL https://code-server.dev/install.sh | sh >/dev/null
 rm -rf /root/.config/code-server   # left by older versions of this step; never used
-log "$(sudo -u dev -H code-server --version 2>/dev/null | head -n 1)"
+log "code-server $(dpkg-query -W -f='${Version}' code-server 2>/dev/null)"
 
 # --- Where it listens ---------------------------------------------------------------
 if id vagrant >/dev/null 2>&1; then

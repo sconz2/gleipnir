@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Gleipnir: Claude's instructions. Turns claude-instructions.md (in the Gleipnir
-# folder) into /etc/claude-code/CLAUDE.md, keeping only the sections that apply
-# to this machine. Runs last, so it knows how everything else was set up.
+# Gleipnir: Claude's instructions and skills. Turns claude-instructions.md (in the
+# Gleipnir folder) into /etc/claude-code/CLAUDE.md, keeping only the sections that
+# apply to this machine, and installs the skills in skills/ for the claude user.
+# Runs last, so it knows how everything else was set up.
 set -euo pipefail
 source "$GLEIPNIR_SRC/scripts/lib.sh"
 
@@ -14,18 +15,20 @@ WIP_BRANCH="$(cfg claude.wip_branch "$(cfg claude.autocommit true)")"
 NETWORK="$(cfg claude.network allowlist)"
 PLAYWRIGHT="$(cfg playwright.enabled false)"
 DEVSERVER_COMMAND="$(cat /etc/gleipnir/devserver-command 2>/dev/null || true)"
+if [ -n "${GLEIPNIR_CONTEXT:-}" ]; then CONTEXT=true; else CONTEXT=false; fi
 
 install -d -m 0755 /etc/claude-code
 trap 'rm -f "$OUT.new"' EXIT
-python3 -I - "$TEMPLATE" "$WIP_BRANCH" "$NETWORK" "$PLAYWRIGHT" "$DEVSERVER_COMMAND" > "$OUT.new" <<'PY'
+python3 -I - "$TEMPLATE" "$WIP_BRANCH" "$NETWORK" "$PLAYWRIGHT" "$DEVSERVER_COMMAND" "$CONTEXT" > "$OUT.new" <<'PY'
 import re, sys
-template, wip_branch, network, playwright, devserver_command = sys.argv[1:6]
+template, wip_branch, network, playwright, devserver_command, context = sys.argv[1:7]
 facts = {
     "wip_branch": wip_branch == "true",
     "network=allowlist": network == "allowlist",
     "network=open": network == "open",
     "playwright": playwright == "true",
     "devserver": devserver_command != "",
+    "context": context == "true",
 }
 
 with open(template) as fh:
@@ -67,3 +70,28 @@ PY
 chmod 0644 "$OUT.new"
 mv "$OUT.new" "$OUT"
 log "Claude's instructions written to $OUT"
+
+# --- Skills: commands like /project-init, from the Gleipnir folder's skills/ ---------
+# Copied into the claude user's ~/.claude/skills on every provision, replacing any skill
+# of the same name; skills Claude made itself are left alone. The copying is done as
+# claude, not root, because claude controls its own home folder.
+SKILLS_IN="$GLEIPNIR_SRC/skills"
+if [ -d "$SKILLS_IN" ]; then
+  stage="$(mktemp -d)"
+  cp -R "$SKILLS_IN"/. "$stage"/
+  chown -R claude:claude "$stage"
+  sudo -u claude -H bash -s "$stage" <<'SH'
+set -euo pipefail
+stage="$1"
+out="$HOME/.claude/skills"
+mkdir -p "$out"
+for skill in "$stage"/*/; do
+  [ -f "$skill/SKILL.md" ] || continue
+  name="$(basename "$skill")"
+  rm -rf "${out:?}/$name"
+  cp -R "$skill" "$out/$name"
+  echo "    Skill: /$name"
+done
+SH
+  rm -rf "$stage"
+fi

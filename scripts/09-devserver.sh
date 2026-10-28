@@ -38,6 +38,11 @@ fi
 # only works if the server listens on all of the VM's addresses, not just its own localhost.
 if id vagrant >/dev/null 2>&1; then HOST=0.0.0.0; else HOST=127.0.0.1; fi
 COMMAND="$(cfg devserver.command '')"
+if [ -z "$COMMAND" ] && [ ! -f "$DEST/package.json" ]; then
+  # A new, empty project: nothing to run yet, and nothing wrong
+  log "No package.json in the project yet; the dev server will be set up on the first provision after it has one"
+  exit 0
+fi
 if [ -z "$COMMAND" ]; then
   has_dev_script="$(python3 -I - "$DEST/package.json" <<'PY'
 import json, sys

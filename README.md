@@ -8,12 +8,13 @@ In Norse myth, Gleipnir was the binding that held the giant wolf Fenrir: as thin
 
 ## What's in it
 
-- One VM per project, each with its own config, deploy key and `.env`
+- One VM per project, each with its own config, deploy key, `.env` and context files, and your own starter `CLAUDE.md`
 - Your project cloned onto the VM's disk, with Node.js and its npm packages
 - A browser-based editor (code-server)
 - The dev server, running in the background
 - Claude Code as a restricted user, with a firewall, managed settings and change checks
 - Claude's work kept on `wip/` branches, committed only when you say, for you to merge and push
+- `/project-init`, a guided setup for a brand-new project, and room for your own skills
 - Optional PostgreSQL, reachable from your computer
 - Optional Playwright browsers
 
@@ -42,8 +43,10 @@ Everything for a machine is named after it. For a machine called `my-project`:
 | `machines/my-project.json` | Its config. The file name is the VM's name: lowercase letters, digits and dashes |
 | `keys/my-project` | The repo's deploy key (the private half; `keys/my-project.pub` is the half you give GitHub). Needed for `git@…` repo URLs |
 | `env/my-project.env` | The project's `.env` file. Optional: used if it's there |
+| `claude/my-project.md` | A starter `CLAUDE.md` for the project. Optional: falls back to `claude/default.md` (see [Your starter CLAUDE.md](#your-starter-claudemd)) |
+| `context/my-project/` | A folder of background files for Claude: briefs, requirements, notes. Optional (see [Project context](#project-context)) |
 
-All three folders are ignored by git, so none of them end up in Gleipnir's own repo. To use a file with a different name, give its path in the config with `deploy_key` or `env_file` (see [Configuration](#configuration)).
+These folders are ignored by git, so none of your files in them end up in Gleipnir's own repo. To use a file or folder with a different name, give its path in the config with `deploy_key`, `env_file`, `claude_file` or `context_dir` (see [Configuration](#configuration)).
 
 1. **Create a deploy key** for the project's repo, without a passphrase, in Gleipnir's `keys/` folder:
 
@@ -98,6 +101,8 @@ Safari on older macOS versions can struggle with the editor; a current Chrome or
 The project's dev server runs in the background as `dev`, so the app is always at `http://localhost:5173` (or the `ports.app` you chose). It starts when the machine boots, restarts if it crashes, and reloads as files change.
 
 By default it runs the project's `dev` script (`npm run dev`), set to listen on port 5173 for the forwarded port. For anything else, set `devserver.command`; it must listen on `0.0.0.0:5173`.
+
+A brand-new project with no `package.json` yet has no dev server; that's expected. Once the project has a `dev` script, run `vagrant provision my-project` to set it up.
 
 Control it from the editor's terminal, or from your computer with `vagrant ssh my-project -c "devserver restart"`:
 
@@ -162,6 +167,26 @@ alias genv='vagrant provision --provision-with env-upload,env'
 
 Then, from the Gleipnir folder, run `genv my-project`.
 
+## Project context
+
+Put background material for Claude (briefs, requirements, notes, designs) in `context/my-project/` on your computer. It's copied into the project as `tmp/context/` on every provision, so it's always there, even after a rebuild:
+
+- **Your computer's copy wins.** The folder is replaced each time, so files you remove are removed in the machine too, and changes made inside the machine are lost.
+- **Claude can read it but not change it.** Your starter `CLAUDE.md` can tell Claude to read it when getting started.
+- **It never goes into git.** The project's `.gitignore` must ignore `tmp/`; provisioning warns you if it doesn't.
+
+After adding or changing files, copy just the folder across:
+
+```bash
+vagrant provision --provision-with context-upload,context my-project
+```
+
+Or add an alias alongside `genv`:
+
+```bash
+alias gctx='vagrant provision --provision-with context-upload,context'
+```
+
 ## Using Claude Code
 
 Start Claude from a terminal on your computer:
@@ -207,6 +232,31 @@ vagrant ssh my-project -c "cat /etc/claude-code/CLAUDE.md"
 
 A project can also have its own `CLAUDE.md` in its repo, for notes about that project. Claude reads both.
 
+### Your starter CLAUDE.md
+
+To give every new project your own way of working (how you like to plan, test, write code and get asked questions), write it once as a starter `CLAUDE.md`:
+
+```bash
+cp claude/example.md.example claude/default.md
+```
+
+Edit it to suit you. Use `claude/default.md` for every project, or `claude/my-project.md` for one machine (it takes priority).
+
+It's copied into the project as `CLAUDE.md` **once, when the machine is first set up**, and only if the project doesn't already have one. After that it belongs to the project: Gleipnir never overwrites it, and changes you make in the project stay there. Commit it to the project's repo if you want to keep it. To bring a later version of your starter into an existing project, copy it across yourself.
+
+### Skills
+
+Skills are commands you can run inside Claude, like `/project-init`. Gleipnir's live in `skills/` in the Gleipnir folder, one folder per skill with a `SKILL.md` in it, and every machine gets them on its next provision, replacing any changes made inside the machine. Edit them, or add your own, there.
+
+**`/project-init`** sets up a new project from an empty repo. Start Claude in the new machine and run it: Claude reads your `CLAUDE.md` and `tmp/context/`, asks what you want (framework, styling, database, testing and so on), confirms the plan, then sets it all up and fills in your `CLAUDE.md`. At the end it lists anything only you can do from your computer, such as turning on PostgreSQL or Playwright in the machine's config and provisioning to start the dev server.
+
+A brand-new repo has no `main` branch until its first commit. After reviewing and committing Claude's setup on its `wip/` branch, create `main` from it and push, in the editor's terminal:
+
+```bash
+git switch -c main
+git push -u origin main
+```
+
 ### What holds Claude in place
 
 - **The `claude` user** has no `sudo` and can't read `dev`'s home, so your git key is out of its reach.
@@ -226,6 +276,7 @@ vagrant ssh my-project
 vagrant halt my-project
 vagrant provision my-project  # apply config changes or a Gleipnir update
 genv my-project               # copy just the .env across (see The .env file)
+gctx my-project               # copy just the context folder across (see Project context)
 vagrant reload my-project     # restart it; needed after changing ports
 vagrant ssh my-project -c "devserver restart"   # restart the dev server
 ```
@@ -241,6 +292,8 @@ Each `machines/<name>.json` file supports:
 | `repo` | (required) | Git URL cloned into `/srv/project` |
 | `deploy_key` | `keys/<name>` | The repo's deploy key, if it's named differently. Relative to the Gleipnir folder |
 | `env_file` | `env/<name>.env` | The project's `.env`, if it's named differently. Relative to the Gleipnir folder |
+| `claude_file` | `claude/<name>.md`, then `claude/default.md` | A starter `CLAUDE.md`, if it's named differently. Relative to the Gleipnir folder |
+| `context_dir` | `context/<name>/` | The project's context folder, if it's named differently. Relative to the Gleipnir folder |
 | `git.name` / `git.email` | none | Your identity for commits made in the VM |
 | `vm.memory` / `vm.cpus` | 3072 / 2 | VM resources, in MB / cores |
 | `ports.editor` / `ports.app` / `ports.db` | 8080 / 5173 / 54320 | Ports on your computer's `localhost`; each machine needs its own. `db` is only used with PostgreSQL |

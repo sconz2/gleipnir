@@ -73,6 +73,17 @@ if [ ! -d "$DEST/.git" ]; then
   # Let the project group (dev and claude) edit everything, now and for new files
   setfacl -R -m g:project:rwX "$DEST"
   find "$DEST" -type d -exec setfacl -m d:g:project:rwX {} +
+
+  # Your starter CLAUDE.md, only on this first setup, and only if the project
+  # doesn't already have one. After that it's the project's file, not Gleipnir's.
+  if [ -n "${GLEIPNIR_CLAUDE_MD:-}" ]; then
+    if [ -e "$DEST/CLAUDE.md" ] || [ -e "$DEST/.claude/CLAUDE.md" ]; then
+      log "The project already has a CLAUDE.md; leaving it as it is"
+    else
+      install -o dev -g project -m 0664 "$GLEIPNIR_CLAUDE_MD" "$DEST/CLAUDE.md"
+      log "Added your starter CLAUDE.md to the project"
+    fi
+  fi
 fi
 
 # --- The project's .env, copied from your computer ------------------------------
@@ -81,6 +92,13 @@ fi
 if [ -n "${GLEIPNIR_ENV:-}" ]; then
   install -o dev -g project -m 0640 "$GLEIPNIR_ENV" "$DEST/.env"
   log "Copied .env into the project"
+fi
+
+# --- The project's context folder, copied from your computer ---------------------
+# Into tmp/context, replacing what's there. Readable by dev and claude; only dev can change it.
+install -m 0755 "$GLEIPNIR_SRC/scripts/files/gleipnir-context" /usr/local/sbin/gleipnir-context
+if [ -n "${GLEIPNIR_CONTEXT:-}" ]; then
+  /usr/local/sbin/gleipnir-context "$GLEIPNIR_CONTEXT"
 fi
 
 # --- npm packages, on first setup ---------------------------------------------

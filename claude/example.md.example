@@ -1,0 +1,43 @@
+# Project notes for Claude
+
+<!-- A starter CLAUDE.md. Copy this to claude/default.md (for every new project) or
+     claude/<machine>.md (for one), and make it yours. Gleipnir copies it into a new
+     project once, when the machine is first set up, and only if the project doesn't
+     already have a CLAUDE.md. After that it's the project's file: edit it there,
+     and commit it if you want to keep it. -->
+
+## About this project
+
+- What it is, and who it's for.
+- The main parts and where they live, e.g. `src/routes` for pages, `src/lib/server` for server-only code.
+
+## Stack
+
+- Framework, language and versions, e.g. SvelteKit with TypeScript.
+- Database and how it's accessed, e.g. PostgreSQL through an ORM.
+- Styling, e.g. Tailwind CSS.
+
+## Commands
+
+- Install: `npm ci`
+- Type and lint checks: `npm run check`, `npm run lint`
+- Tests: `npm test`, and `npx playwright test` for end-to-end tests
+- Don't start the dev server; it's already running.
+
+## How I work
+
+- Before a larger change, outline your plan in a few lines and wait for me to agree.
+- Keep changes small and focused on the request. Mention anything else you notice instead of changing it.
+- Ask when something is unclear rather than guessing.
+- After each change, run the checks and tests above and fix anything you broke.
+
+## Code style
+
+- Follow the patterns already in the codebase before inventing new ones.
+- Prefer clear names and small functions over comments.
+- No new dependencies without asking first.
+
+## Don't
+
+- Don't edit generated files or anything in `node_modules`.
+- Don't change config files (build, lint, CI) unless I ask.

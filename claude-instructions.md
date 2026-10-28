@@ -8,6 +8,7 @@
     {{if network=allowlist}} / {{if network=open}}      claude.network
     {{if playwright}}                                   playwright.enabled is on
     {{if devserver}}                                    the dev server is set up
+    {{if context}}                                      a context folder is copied into the project
   {{devserver_command}} becomes the dev server's command.
   This comment isn't included.
 -->
@@ -22,6 +23,9 @@ You're running inside a Gleipnir VM, as the `claude` user.
 {{end}}
 {{if network=open}}
 - Your network connections are logged.
+{{end}}
+{{if context}}
+- `tmp/context/` in the project holds background files from the user (briefs, requirements, notes). It's read-only for you and replaced from the user's computer on each provision, so don't try to change it.
 {{end}}
 {{if playwright}}
 - Playwright's browsers are installed in /opt/playwright. Don't run `playwright install`; if a browser is missing, say so.

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Gleipnir: set up, or update, a sandboxed Claude Code environment on Ubuntu 24.04.
 #
-#   sudo ./install.sh /path/to/config.json [/path/to/deploy_key] [/path/to/.env]
+#   sudo ./install.sh /path/to/config.json [deploy_key] [.env] [starter CLAUDE.md] [context folder]
 #
-# Pass "" for the deploy key if you only have a .env file.
+# Pass "" for any file you don't have, to reach the ones after it.
 # Safe to re-run: that's how config changes and updates are applied.
 # Vagrant runs this for you; on a VPS you run it yourself.
 set -euo pipefail
@@ -13,9 +13,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-CONFIG_IN="${1:?usage: install.sh config.json [deploy_key] [env_file]}"
+CONFIG_IN="${1:?usage: install.sh config.json [deploy_key] [env_file] [claude_file] [context_dir]}"
 KEY_IN="${2:-}"
 ENV_IN="${3:-}"
+CLAUDE_MD_IN="${4:-}"
+CONTEXT_IN="${5:-}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
 # A root-only copy of the config: it can hold passwords
@@ -26,6 +28,8 @@ export GLEIPNIR_SRC="$SRC"
 export GLEIPNIR_CONFIG=/etc/gleipnir/config.json
 export GLEIPNIR_KEY="$KEY_IN"
 export GLEIPNIR_ENV="$ENV_IN"
+export GLEIPNIR_CLAUDE_MD="$CLAUDE_MD_IN"
+export GLEIPNIR_CONTEXT="$CONTEXT_IN"
 
 for step in "$SRC"/scripts/[0-9][0-9]-*.sh; do
   echo "==> Gleipnir: $(basename "$step" .sh)"

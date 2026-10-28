@@ -7,8 +7,12 @@
 #   machines/my-project.json  ->  vagrant up my-project
 #
 # Its other files are found by the same name, unless its config points elsewhere:
-#   keys/my-project      the repo's deploy key (needed for SSH repo URLs), or "deploy_key"
-#   env/my-project.env   the project's .env (optional), or "env_file"
+#   keys/my-project        the repo's deploy key (needed for SSH repo URLs), or "deploy_key"
+#   env/my-project.env     the project's .env (optional), or "env_file"
+#   claude/my-project.md   a starter CLAUDE.md for the project (optional; falls back to
+#                          claude/default.md), or "claude_file"
+#   context/my-project/    background files for Claude, copied to the project's
+#                          tmp/context (optional), or "context_dir"
 #
 # This file only creates the VMs and hands over to install.sh, which does the
 # real work and is the same entry point used on a VPS.
@@ -67,6 +71,18 @@ machines = Dir.glob(File.join(root, 'machines', '*.json')).sort.map do |file|
   # The project's .env: env/<name>.env, if there is one
   env_file = find.call('env_file', "env/#{name}.env")
 
+  # A starter CLAUDE.md for the project: claude/<name>.md, else claude/default.md
+  claude_file = find.call('claude_file', "claude/#{name}.md")
+  claude_file ||= File.join(root, 'claude', 'default.md') if File.file?(File.join(root, 'claude', 'default.md'))
+
+  # Background files for Claude: context/<name>/, a folder
+  context_dir = File.join(root, 'context', name)
+  if settings['context_dir']
+    context_dir = File.expand_path(settings['context_dir'], root)
+    abort "Gleipnir: #{where}: context_dir not found at #{context_dir}." unless File.directory?(context_dir)
+  end
+  context_dir = nil unless File.directory?(context_dir)
+
   ports = settings['ports'] || {}
   postgres = settings['postgres'] || {}
   {
@@ -75,6 +91,8 @@ machines = Dir.glob(File.join(root, 'machines', '*.json')).sort.map do |file|
     settings: settings,
     key: key,
     env_file: env_file,
+    claude_file: claude_file,
+    context_dir: context_dir,
     editor_port: ports.fetch('editor', 8080),
     app_port: ports.fetch('app', 5173),
     db_port: postgres['enabled'] == true ? ports.fetch('db', 54320) : nil
@@ -125,25 +143,30 @@ Vagrant.configure('2') do |config|
         vb.cpus = vm_settings.fetch('cpus', 2)
       end
 
-      # Upload Gleipnir's scripts, this machine's config, deploy key and .env
+      # Upload Gleipnir's scripts and this machine's config, key, .env, starter CLAUDE.md and context
       machine.vm.provision 'shell', name: 'Gleipnir: preparing upload',
         inline: "rm -rf #{upload} && install -d -m 0700 -o vagrant -g vagrant #{upload}"
       machine.vm.provision 'file', source: File.join(root, 'install.sh'), destination: "#{upload}/install.sh"
       machine.vm.provision 'file', source: File.join(root, 'scripts'), destination: "#{upload}/scripts"
       machine.vm.provision 'file', source: File.join(root, 'claude-instructions.md'), destination: "#{upload}/claude-instructions.md"
+      machine.vm.provision 'file', source: File.join(root, 'skills'), destination: "#{upload}/skills"
       machine.vm.provision 'file', source: m[:file], destination: "#{upload}/config.json"
       machine.vm.provision 'file', source: m[:key], destination: "#{upload}/deploy_key" if m[:key]
       machine.vm.provision 'file', source: m[:env_file], destination: "#{upload}/env" if m[:env_file]
+      machine.vm.provision 'file', source: m[:claude_file], destination: "#{upload}/claude.md" if m[:claude_file]
+      machine.vm.provision 'file', source: m[:context_dir], destination: "#{upload}/context" if m[:context_dir]
 
       # The same entry point as on a VPS. An empty argument means "none".
       install_args = [
         "#{upload}/config.json",
         m[:key] ? "#{upload}/deploy_key" : '',
-        m[:env_file] ? "#{upload}/env" : ''
+        m[:env_file] ? "#{upload}/env" : '',
+        m[:claude_file] ? "#{upload}/claude.md" : '',
+        m[:context_dir] ? "#{upload}/context" : ''
       ].map { |arg| "\"#{arg}\"" }.join(' ')
       machine.vm.provision 'shell', name: 'Gleipnir: install', inline: "bash #{upload}/install.sh #{install_args}"
 
-      # Tidy up: the key and .env now live only where install.sh put them
+      # Tidy up: the key and other files now live only where install.sh put them
       machine.vm.provision 'shell', name: 'Gleipnir: cleaning up', inline: "rm -rf #{upload}"
 
       # Copy just the .env, without a full provision. These only run when asked for:
@@ -163,6 +186,20 @@ Vagrant.configure('2') do |config|
           echo "Gleipnir: .env copied into the project"
           # Restart the dev server, if it's running, so it picks up the change
           devserver try-restart 2>/dev/null || true
+        SHELL
+      end
+
+      # Copy just the context folder, without a full provision. Only runs when asked for:
+      #   vagrant provision my-project --provision-with context-upload,context
+      if m[:context_dir]
+        # A new name each run, so a folder left by an interrupted run can't get in the way
+        staged = "/home/vagrant/.gleipnir-context-#{Time.now.to_i}"
+        machine.vm.provision 'context-upload', type: 'file', run: 'never',
+          source: m[:context_dir], destination: staged
+        machine.vm.provision 'context', type: 'shell', run: 'never', inline: <<~SHELL
+          set -e
+          trap 'rm -rf #{staged}' EXIT
+          /usr/local/sbin/gleipnir-context #{staged}
         SHELL
       end
     end
