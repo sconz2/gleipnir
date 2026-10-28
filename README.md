@@ -173,7 +173,7 @@ Put background material for Claude (briefs, requirements, notes, designs) in `co
 
 - **Your computer's copy wins.** The folder is replaced each time, so files you remove are removed in the machine too, and changes made inside the machine are lost.
 - **Claude can read it but not change it.** Your starter `CLAUDE.md` can tell Claude to read it when getting started.
-- **It never goes into git.** The project's `.gitignore` must ignore `tmp/`; provisioning warns you if it doesn't.
+- **It never goes into git.** Every provision checks the project's `.gitignore` ignores `tmp/`, and adds it (creating the file if needed) if not.
 
 After adding or changing files, copy just the folder across:
 

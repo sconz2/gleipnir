@@ -94,6 +94,24 @@ if [ -n "${GLEIPNIR_ENV:-}" ]; then
   log "Copied .env into the project"
 fi
 
+# --- Keep tmp/ out of git, on every provision -----------------------------------------
+# tmp/ holds the context files, which mustn't be committed. Done as dev, since the
+# project is writable by claude.
+added="$(sudo -u dev -H bash -s <<'SH'
+set -euo pipefail
+cd /srv/project
+if ! git check-ignore -q tmp/context; then
+  # Start on a new line if the file doesn't end with one
+  if [ -s .gitignore ] && [ -n "$(tail -c 1 .gitignore)" ]; then echo >> .gitignore; fi
+  echo "tmp/" >> .gitignore
+  echo yes
+fi
+SH
+)"
+if [ "$added" = "yes" ]; then
+  log "Added tmp/ to the project's .gitignore (commit it when you're ready)"
+fi
+
 # --- The project's context folder, copied from your computer ---------------------
 # Into tmp/context, replacing what's there. Readable by dev and claude; only dev can change it.
 install -m 0755 "$GLEIPNIR_SRC/scripts/files/gleipnir-context" /usr/local/sbin/gleipnir-context
