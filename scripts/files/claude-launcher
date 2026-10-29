@@ -22,7 +22,7 @@ if ! sudo -n true 2>/dev/null; then
   exit 1
 fi
 
-if [ ! -d "$WORK/.git" ]; then
+if ! sudo -n test -d "$WORK/.git"; then
   echo "Gleipnir: Claude's copy of the project isn't set up yet; run a full provision first." >&2
   exit 1
 fi
