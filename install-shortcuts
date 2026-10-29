@@ -1,8 +1,9 @@
 #!/bin/sh
-# Gleipnir: adds the shortcuts gup, gprov, genv, gctx and gssh to your shell's startup
-# file, or updates them if they're already there. They work from any folder.
+# Gleipnir: adds the shortcuts gup, gprov, genv, gctx, gssh, ghalt and gdestroy to your
+# shell's startup file, or updates them if they're already there. They work from any folder.
 #
-#   ./install-shortcuts                     add them to ~/.zshrc (or update them)
+#   ./install-shortcuts                     add them (or update them) for your shell:
+#                                           ~/.zshrc for zsh, ~/.bash_profile for bash
 #   ./install-shortcuts --file ~/.bashrc    use a different file
 #   ./install-shortcuts --remove            take them out again
 #
@@ -11,12 +12,16 @@
 # and the previous version is kept as <file>.gleipnir-backup.
 set -eu
 
-RC="$HOME/.zshrc"
+# Your shell's startup file: bash on a Mac reads ~/.bash_profile, on Linux ~/.bashrc
+case "$(basename "${SHELL:-zsh}")" in
+  bash) if [ "$(uname)" = Darwin ] || [ -f "$HOME/.bash_profile" ]; then RC="$HOME/.bash_profile"; else RC="$HOME/.bashrc"; fi ;;
+  *)    RC="$HOME/.zshrc" ;;
+esac
 MODE=install
 START='# >>> Gleipnir shortcuts (managed by install-shortcuts) >>>'
 END='# <<< Gleipnir shortcuts <<<'
 
-usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,12s/^# \{0,1\}//p' "$0"; }
 fail() { echo "install-shortcuts: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
@@ -51,7 +56,7 @@ awk -v s="$START" -v e="$END" '$0 == s { skip = 1; next } $0 == e { skip = 0; ne
 if [ "$MODE" = install ]; then
   # The same names defined elsewhere in the file (e.g. older aliases) would clash: zsh
   # expands an alias even in a function definition, which breaks every new terminal
-  clashes="$(grep -nE '^[[:space:]]*(alias[[:space:]]+)?(gup|gprov|genv|gctx|gssh)[[:space:]]*(=|\(\))' "$tmp" || true)"
+  clashes="$(grep -nE '^[[:space:]]*(alias[[:space:]]+|function[[:space:]]+)?(gup|gprov|genv|gctx|gssh|ghalt|gdestroy)[[:space:]]*(=|\(\)|\{)' "$tmp" || true)"
   if [ -n "$clashes" ]; then
     echo "install-shortcuts: $RC already defines some of these names. Remove these lines, then run it again:" >&2
     printf '%s\n' "$clashes" | sed 's/^/  line /' >&2
@@ -67,15 +72,25 @@ if [ "$MODE" = install ]; then
     echo "$START"
     echo "GLEIPNIR_DIR=$quoted"
     cat <<'EOF'
-_gleipnir_need() { [ -n "${2:-}" ] || { echo "usage: $1 <machine>" >&2; return 2; }; }
+# Older aliases with these names, from anywhere, would replace the shortcuts; and the
+# "function" keyword stops an alias name being expanded in the definitions themselves
+unalias gup gprov genv gctx gssh ghalt gdestroy 2>/dev/null
+function _gleipnir_need { [ -n "${2:-}" ] || { echo "usage: $1 <machine>" >&2; return 2; }; }
 # Start or fully provision a machine, saving the output to logs/ in the Gleipnir folder
-gup()   { _gleipnir_need gup "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant up "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
-gprov() { _gleipnir_need gprov "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant provision "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
+function gup   { _gleipnir_need gup "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant up "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
+function gprov { _gleipnir_need gprov "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant provision "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
 # Copy just the .env (and restart the dev server), or just the context folder
-genv()  { _gleipnir_need genv "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with env-upload,env ); }
-gctx()  { _gleipnir_need gctx "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with context-upload,context ); }
-# Log in to a machine
-gssh()  { _gleipnir_need gssh "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant ssh "$1" ); }
+function genv  { _gleipnir_need genv "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with env-upload,env ); }
+function gctx  { _gleipnir_need gctx "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with context-upload,context ); }
+# Log in to a machine, or shut it down
+function gssh  { _gleipnir_need gssh "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant ssh "$1" ); }
+function ghalt { _gleipnir_need ghalt "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant halt "$1" ); }
+# Delete a machine. Vagrant still asks you to confirm.
+function gdestroy {
+  _gleipnir_need gdestroy "${1:-}" || return
+  echo "This deletes the $1 VM: any work you haven't pushed, and its database, are lost for good."
+  ( cd "$GLEIPNIR_DIR" && vagrant destroy "$1" )
+}
 EOF
     echo "$END"
   } >> "$tmp"
@@ -85,7 +100,7 @@ fi
 cat "$tmp" > "$RC"
 
 if [ "$MODE" = install ]; then
-  echo "Gleipnir shortcuts added to $RC (gup, gprov, genv, gctx, gssh), for the folder $DIR"
+  echo "Gleipnir shortcuts added to $RC (gup, gprov, genv, gctx, gssh, ghalt, gdestroy), for the folder $DIR"
   echo "Open a new terminal, or run: source $RC"
 else
   echo "Gleipnir shortcuts removed from $RC"

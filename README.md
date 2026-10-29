@@ -295,12 +295,13 @@ To update Gleipnir itself: `git pull` in this folder, then `vagrant provision <n
 
 ## Shortcuts
 
-A few shell commands save typing, and work from any folder. To add them to your `~/.zshrc`, run this once from the Gleipnir folder:
+A few shell commands save typing, and work from any folder. To add them, run this once from the Gleipnir folder, then open a new terminal:
 
 ```bash
 ./install-shortcuts
-source ~/.zshrc
 ```
+
+They go in your shell's startup file: `~/.zshrc` if your terminal uses zsh (the macOS default), or `~/.bash_profile` if it uses bash. `echo $SHELL` tells you which.
 
 | Shortcut | Does |
 | --- | --- |
@@ -309,10 +310,12 @@ source ~/.zshrc
 | `genv my-project` | Copy just the `.env` across, and restart the dev server (see [The .env file](#the-env-file)) |
 | `gctx my-project` | Copy just the context folder across (see [Project context](#project-context)) |
 | `gssh my-project` | Log in to a machine (`vagrant ssh`) |
+| `ghalt my-project` | Shut a machine down (`vagrant halt`) |
+| `gdestroy my-project` | Delete a machine (`vagrant destroy`), after a reminder of what's lost. Vagrant still asks you to confirm |
 
 Each `gup` and `gprov` run gets its own log, named after the machine and the time, such as `logs/my-project-2026-10-29-134502.log`. `logs/` is ignored by git, since the output includes your machine's details.
 
-Run `./install-shortcuts` again after moving the Gleipnir folder: it updates the shortcuts rather than adding them twice. It only changes its own block in the file, and keeps the previous version as `~/.zshrc.gleipnir-backup`. Use `--file ~/.bashrc` for a different file, or `--remove` to take them out.
+Run `./install-shortcuts` again after moving the Gleipnir folder: it updates the shortcuts rather than adding them twice. It only changes its own block in the file, and keeps the previous version alongside it (for example `~/.zshrc.gleipnir-backup`). If you already have aliases or functions with the same names, it asks you to remove them first. Use `--file` for a different file, or `--remove` to take them out.
 
 ## Configuration
 
