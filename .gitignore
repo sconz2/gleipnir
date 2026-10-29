@@ -12,4 +12,7 @@
 /context/*
 !/context/.gitkeep
 
+# Provisioning logs from the gup and gprov shortcuts: they include your machine's details
+/logs/
+
 .DS_Store

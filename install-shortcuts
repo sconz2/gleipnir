@@ -1,0 +1,93 @@
+#!/bin/sh
+# Gleipnir: adds the shortcuts gup, gprov, genv, gctx and gssh to your shell's startup
+# file, or updates them if they're already there. They work from any folder.
+#
+#   ./install-shortcuts                     add them to ~/.zshrc (or update them)
+#   ./install-shortcuts --file ~/.bashrc    use a different file
+#   ./install-shortcuts --remove            take them out again
+#
+# Run it again after moving the Gleipnir folder. Only the block between the
+# "Gleipnir shortcuts" markers is ever changed; the rest of the file is left alone,
+# and the previous version is kept as <file>.gleipnir-backup.
+set -eu
+
+RC="$HOME/.zshrc"
+MODE=install
+START='# >>> Gleipnir shortcuts (managed by install-shortcuts) >>>'
+END='# <<< Gleipnir shortcuts <<<'
+
+usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
+fail() { echo "install-shortcuts: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --file)    [ $# -ge 2 ] || fail "--file needs a path"; RC="$2"; shift 2 ;;
+    --remove)  MODE=remove; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)         usage >&2; exit 2 ;;
+  esac
+done
+
+# The Gleipnir folder: wherever this script is
+DIR="$(cd "$(dirname "$0")" && pwd -P)"
+[ -f "$DIR/Vagrantfile" ] || fail "run this from inside the Gleipnir folder"
+
+# A half-finished block (a start marker without its end) would make us drop the
+# rest of the file, so refuse rather than guess
+touch "$RC"
+starts="$(grep -cxF "$START" "$RC" || true)"
+ends="$(grep -cxF "$END" "$RC" || true)"
+[ "$starts" = "$ends" ] || fail "$RC has a Gleipnir shortcuts start or end marker without the other; fix it by hand"
+
+cp "$RC" "$RC.gleipnir-backup"
+
+# Everything except an existing block
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+# (and without blank lines at the very end, so removing the block leaves the file as it was)
+awk -v s="$START" -v e="$END" '$0 == s { skip = 1; next } $0 == e { skip = 0; next } !skip' "$RC" \
+  | awk 'NF { while (blank > 0) { print ""; blank-- } print; next } { blank++ }' > "$tmp"
+
+if [ "$MODE" = install ]; then
+  # The same names defined elsewhere in the file (e.g. older aliases) would clash: zsh
+  # expands an alias even in a function definition, which breaks every new terminal
+  clashes="$(grep -nE '^[[:space:]]*(alias[[:space:]]+)?(gup|gprov|genv|gctx|gssh)[[:space:]]*(=|\(\))' "$tmp" || true)"
+  if [ -n "$clashes" ]; then
+    echo "install-shortcuts: $RC already defines some of these names. Remove these lines, then run it again:" >&2
+    printf '%s\n' "$clashes" | sed 's/^/  line /' >&2
+    exit 1
+  fi
+  # The folder, quoted for the shell even if its name contains a '
+  quoted="'$(printf '%s' "$DIR" | sed "s/'/'\\\\''/g")'"
+  # A blank line before the block, unless the file is empty or already ends with one
+  blank=no
+  if [ -s "$tmp" ] && [ -n "$(tail -n 1 "$tmp")" ]; then blank=yes; fi
+  {
+    if [ "$blank" = yes ]; then echo; fi
+    echo "$START"
+    echo "GLEIPNIR_DIR=$quoted"
+    cat <<'EOF'
+_gleipnir_need() { [ -n "${2:-}" ] || { echo "usage: $1 <machine>" >&2; return 2; }; }
+# Start or fully provision a machine, saving the output to logs/ in the Gleipnir folder
+gup()   { _gleipnir_need gup "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant up "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
+gprov() { _gleipnir_need gprov "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant provision "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
+# Copy just the .env (and restart the dev server), or just the context folder
+genv()  { _gleipnir_need genv "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with env-upload,env ); }
+gctx()  { _gleipnir_need gctx "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with context-upload,context ); }
+# Log in to a machine
+gssh()  { _gleipnir_need gssh "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant ssh "$1" ); }
+EOF
+    echo "$END"
+  } >> "$tmp"
+fi
+
+# Write through, so a ~/.zshrc that's a link to a dotfiles repo stays a link
+cat "$tmp" > "$RC"
+
+if [ "$MODE" = install ]; then
+  echo "Gleipnir shortcuts added to $RC (gup, gprov, genv, gctx, gssh), for the folder $DIR"
+  echo "Open a new terminal, or run: source $RC"
+else
+  echo "Gleipnir shortcuts removed from $RC"
+fi
+echo "The previous version is in $RC.gleipnir-backup"

@@ -73,6 +73,8 @@ These folders are ignored by git, so none of your files in them end up in Gleipn
    vagrant up my-project
    ```
 
+   Or `gup my-project`, which also saves the output to `logs/` (see [Shortcuts](#shortcuts)).
+
 ### Checking it worked
 
 After `vagrant ssh my-project`:
@@ -161,13 +163,7 @@ After editing it, copy just that file across, which takes a few seconds instead 
 vagrant provision --provision-with env-upload,env my-project
 ```
 
-To save typing, add an alias to your shell profile (`~/.zshrc` on a Mac) that works for any machine:
-
-```bash
-alias genv='vagrant provision --provision-with env-upload,env'
-```
-
-Then, from the Gleipnir folder, run `genv my-project`.
+With the [shortcuts](#shortcuts) installed, that's just `genv my-project`.
 
 ## Project context
 
@@ -183,11 +179,7 @@ After adding or changing files, copy just the folder across:
 vagrant provision --provision-with context-upload,context my-project
 ```
 
-Or add an alias alongside `genv`:
-
-```bash
-alias gctx='vagrant provision --provision-with context-upload,context'
-```
+With the [shortcuts](#shortcuts) installed, that's just `gctx my-project`.
 
 ## Using Claude Code
 
@@ -293,13 +285,34 @@ vagrant up my-project         # start one (a bare `vagrant up` starts none)
 vagrant ssh my-project
 vagrant halt my-project
 vagrant provision my-project  # apply config changes or a Gleipnir update
-genv my-project               # copy just the .env across (see The .env file)
-gctx my-project               # copy just the context folder across (see Project context)
+genv my-project               # copy just the .env across (a shortcut: see below)
+gctx my-project               # copy just the context folder across (a shortcut: see below)
 vagrant reload my-project     # restart it; needed after changing ports
 vagrant ssh my-project -c "devserver restart"   # restart the dev server
 ```
 
 To update Gleipnir itself: `git pull` in this folder, then `vagrant provision <name>` for each running machine.
+
+## Shortcuts
+
+A few shell commands save typing, and work from any folder. To add them to your `~/.zshrc`, run this once from the Gleipnir folder:
+
+```bash
+./install-shortcuts
+source ~/.zshrc
+```
+
+| Shortcut | Does |
+| --- | --- |
+| `gup my-project` | Start a machine (`vagrant up`), saving the output to `logs/` |
+| `gprov my-project` | Provision a machine again, saving the output to `logs/` |
+| `genv my-project` | Copy just the `.env` across, and restart the dev server (see [The .env file](#the-env-file)) |
+| `gctx my-project` | Copy just the context folder across (see [Project context](#project-context)) |
+| `gssh my-project` | Log in to a machine (`vagrant ssh`) |
+
+Each `gup` and `gprov` run gets its own log, named after the machine and the time, such as `logs/my-project-2026-10-29-134502.log`. `logs/` is ignored by git, since the output includes your machine's details.
+
+Run `./install-shortcuts` again after moving the Gleipnir folder: it updates the shortcuts rather than adding them twice. It only changes its own block in the file, and keeps the previous version as `~/.zshrc.gleipnir-backup`. Use `--file ~/.bashrc` for a different file, or `--remove` to take them out.
 
 ## Configuration
 
