@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Gleipnir: run by squid.service after Squid starts. Squid checks its inner ports at
+# start-up a moment before they're listening, marks them down, and fails the first
+# request on each port. One request per port, closed before anything is sent through,
+# makes it check again. No connection leaves the machine. Never fails the service.
+# Squid tells systemd it's ready when its first port opens, not all of them, so each
+# port is retried for up to 10 seconds.
+set -uo pipefail
+
+warm() {
+  local port="$1" list="$2" name
+  name="$(grep -v '^#' "$list" 2>/dev/null | sed 's/^\.//' | head -n 1)"
+  [ -n "$name" ] || return 0   # nothing allowed on this port, so nothing to warm
+  python3 -I - "$port" "$name" <<'PY'
+import socket, sys, time
+port, name = int(sys.argv[1]), sys.argv[2]
+for _ in range(20):
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(f"CONNECT {name}:443 HTTP/1.1\r\nHost: {name}:443\r\n\r\n".encode())
+        status = s.recv(4096).split(b"\r\n")[0]
+        s.close()
+        if b" 200" in status:
+            sys.exit(0)
+    except OSError:
+        pass
+    time.sleep(0.5)
+print(f"gjoll-proxy-warmup: port {port} didn't become ready", file=sys.stderr)
+PY
+}
+
+warm 3128 /etc/squid/gleipnir/claude-domains
+warm 3129 /etc/squid/gleipnir/runner-domains
+exit 0

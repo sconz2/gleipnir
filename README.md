@@ -12,7 +12,7 @@ In Norse myth, Gleipnir was the binding that held the giant wolf Fenrir: as thin
 - Your project cloned onto the VM's disk, with Node.js and its npm packages
 - A browser-based editor (code-server)
 - The dev server, running in the background
-- Claude Code as a restricted user, with a firewall, managed settings and change checks
+- Claude Code as a restricted user, with a firewall, a proxy that checks every site by name, managed settings and change checks
 - Claude's work kept on `wip/` branches, committed only when you say, for you to merge and push
 - `/project-init`, a guided setup for a brand-new project, and room for your own skills
 - Optional PostgreSQL, reachable from your computer
@@ -84,6 +84,8 @@ ls -la /srv/project                     # owned by dev, group project
 sudo -u dev git -C /srv/project status  # a clean working tree
 devserver                               # the dev server: active (running)
 sudo -u claude curl -s --max-time 3 http://127.0.0.1:8080 || echo blocked   # Claude can't reach the editor
+sudo -u claude getent hosts example.com || echo blocked                     # Claude can't look names up
+sudo gjoll-firewall --verify            # Gjöll's own checks, including the proxy
 ```
 
 ## Using the editor
@@ -260,12 +262,28 @@ git push -u origin main
 ### What holds Claude in place
 
 - **The `claude` user** has no `sudo` and can't read `dev`'s home, so your git key is out of its reach.
-- **Týr**, the managed settings in `/etc/claude-code/`, are owned by root and override any user or project settings. They block Claude's file tools from `.env` files, turn off non-essential traffic, and run Heimdall's checks. Claude also gets a root-owned `CLAUDE.md` made from `claude-instructions.md` (see above).
-- **Gjöll** limits the `claude` user to Anthropic, the npm registry and the sites you list in `claude.allowed_domains`. Nothing else in the machine is restricted. It refreshes the sites' addresses every 30 minutes. It also stops Claude connecting to the editor, which has no password and would otherwise give it a terminal as `dev`. Claude won't start if Gjöll isn't in place.
+- **Týr**, the managed settings in `/etc/claude-code/`, are owned by root and override any user or project settings. They block Claude's file tools from `.env` files, turn off non-essential traffic and Claude's commit attribution, keep your claude.ai connectors (Drive, Gmail and so on) out of the machine, and run Heimdall's checks. Claude also gets a root-owned `CLAUDE.md` made from `claude-instructions.md` (see above).
+- **Gjöll** limits the `claude` user to Anthropic, the npm registry and the sites you list in `claude.allowed_domains`, in two parts:
+  - **A firewall** that lets `claude` reach only the machine itself (the dev server, the database) and one port on a local proxy. It has no DNS either, so it can't look names up, or carry data out inside lookups. It also stops Claude connecting to the editor, which has no password and would otherwise give it a terminal as `dev`.
+  - **A proxy (Squid)** that checks every connection by the site's **name**, not its address: first the name the tool asks for, then the name inside the encrypted connection's opening message. Checking names matters because big hosting networks (Cloudflare and similar) serve thousands of sites from the same addresses, so allowing an address would allow them all. The proxy never decrypts anything, so there are no certificates to install.
+
+  Tools find the proxy through the standard `HTTPS_PROXY` setting, which Claude gets automatically. A tool that ignores it can't connect at all, rather than going round. Claude won't start if the firewall or the proxy isn't running. The proxy and the database server are firewalled too: the proxy can only make HTTPS connections, and PostgreSQL can't connect out at all.
 - **Heimdall** flags changes to package scripts, tool configs and shell scripts, npm package changes (watch for look-alike names), and new git hooks or settings that run commands: after each turn, and in a summary when you exit.
 - **npm install scripts** are off for the `claude` user.
+- **Git hooks** for Claude's commits: they must go on a `wip/` branch, and their messages can't credit Claude or Anthropic (no trailer, such as `Co-Authored-By:`, that mentions either, and no "Generated with Claude Code" lines).
 
-To let Claude reach another site, add it to `claude.allowed_domains` and run `vagrant provision my-project`. Setting `claude.network` to `"open"` removes the allowlist entirely; Claude's connections are then logged (`sudo journalctl -k | grep gjoll`). Use it only on machines with nothing sensitive in them.
+To let Claude reach another site, add it to `claude.allowed_domains` and run `vagrant provision my-project`. A name like `docs.example.com` allows just that site; `.example.com` (or `*.example.com`) allows `example.com` and everything under it. Setting `claude.network` to `"open"` removes the allowlist and the proxy entirely; Claude's connections are then logged (`sudo journalctl -k | grep gjoll`). Use it only on machines with nothing sensitive in them.
+
+#### Seeing what was blocked
+
+When you exit Claude, the `claude` command lists any sites Gjöll blocked during the session. To look at any time:
+
+```bash
+sudo gjoll-log                 # the last 24 hours
+sudo gjoll-log --since 2h      # or 30m, 3d
+```
+
+It shows three kinds of block: sites that aren't on the list (usually documentation Claude tried to read: add it if you want), connections where a tool asked for an allowed site but then named a different one, and attempts to go round the proxy. The last two shouldn't happen in normal use, and names you don't recognise, such as a long random string in front of a domain, are worth a closer look. After Claude Code updates, you'll usually see `raw.githubusercontent.com` once: that's Claude Code fetching its changelog, and it's harmless to leave blocked.
 
 ## Everyday commands
 
@@ -308,7 +326,7 @@ Each `machines/<name>.json` file supports:
 | `postgres.user` / `postgres.password` | `app` / (required) | The database user for your app |
 | `postgres.databases` | none | Databases to create, owned by that user |
 | `claude.network` | `allowlist` | `allowlist`, or `open` to let Claude reach any site |
-| `claude.allowed_domains` | none | Extra sites Claude may reach, by exact name |
+| `claude.allowed_domains` | none | Extra sites Claude may reach: `docs.example.com` for that site only, `.example.com` for it and everything under it |
 | `claude.wip_branch` | `true` | Claude works on a `wip/` branch, and commits there only when you say. (Formerly `claude.autocommit`, which still works) |
 | `claude.checks` | `true` | Heimdall's change checks |
 
@@ -323,11 +341,11 @@ The project isn't on your computer. Until you push, the only copy of your work i
 Gleipnir keeps Claude well away from your computer, but inside the machine it isn't sealed:
 
 - **The dev server isn't firewalled.** It runs code Claude can edit, as `dev`, with normal network access.
-- **Gjöll works by IP address.** Sites on big shared hosting (Cloudflare, Vercel and similar) share addresses with other sites, so allowing one lets some others through. Keep the list short.
-- **DNS lookups aren't restricted**, and can carry small amounts of data out.
+- **Gjöll checks names, not what's inside the connection.** Some hosting networks let a connection name one of their sites at the start and then ask for another inside the encryption ("domain fronting"); many big networks refuse this now, but not all. A connection that gives no name at the start reaches only the default site at the allowed name's address.
+- **Allowed sites are allowed for anything.** Code Claude runs could send data to a site on the list, such as an API, using someone else's account there. Keep the list short.
 - **`.env` protection only covers Claude's file tools.** A shell command run by Claude can still read the file. Keep real production secrets out of these machines.
 - **Claude can read and change everything in the project**, including `.git`, and the local database (the password is in `.env`). Use test data, not real personal records.
-- **The commit guard and npm setting are guardrails, not locks.** The real protection is that only you merge and push.
+- **The commit guards and npm setting are guardrails, not locks.** The real protection is that only you merge and push.
 
 ## Licence
 

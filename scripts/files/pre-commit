@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Gleipnir: refuses commits made by Claude anywhere but its own wip/ branch.
-# Only applies inside Claude's sessions; your own commits as dev aren't affected.
+# Gleipnir: refuses commits made by Claude anywhere but its own wip/ branch, when
+# claude.wip_branch is on. Only applies inside Claude's sessions; your own commits
+# as dev aren't affected.
+
+[ -f /etc/gleipnir/claude-autocommit ] || exit 0
 
 branch="$(git symbolic-ref --short -q HEAD || echo '(no branch)')"
 case "$branch" in

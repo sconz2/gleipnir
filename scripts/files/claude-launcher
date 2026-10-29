@@ -5,6 +5,7 @@ set -uo pipefail
 
 PROJECT=/srv/project
 REAL="$(cat /etc/gleipnir/claude-bin 2>/dev/null || echo /usr/bin/claude)"
+NETWORK="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
 
 # Inside Claude's own sessions, this name goes straight to Claude Code
 if [ "$(id -un)" = "claude" ]; then
@@ -23,11 +24,29 @@ if ! sudo -n /usr/local/sbin/gjoll-firewall --check; then
   exit 1
 fi
 
+# In allowlist mode, the proxy is Claude's only way out. Without it Claude would start
+# but couldn't reach Anthropic, so say so now.
+proxy_env=()
+if [ "$NETWORK" = "allowlist" ]; then
+  if ! systemctl is-active --quiet squid; then
+    echo "Gleipnir: Gjöll's proxy (Squid) isn't running, so Claude would have no network." >&2
+    echo "Start it with: sudo systemctl restart squid   (its log: sudo journalctl -u squid)" >&2
+    exit 1
+  fi
+  # The same settings as Týr's, for anything that runs before Claude Code reads them
+  if [ -f /etc/gleipnir/claude-env ]; then
+    mapfile -t proxy_env < <(grep -E '^[A-Za-z_]+=' /etc/gleipnir/claude-env)
+  fi
+fi
+
 # Git commands on the project run as dev, never as this admin user
 as_dev() { sudo -n -u dev -H "$@"; }
 
+# Gleipnir's git hooks for Claude's commits: no Claude attribution in messages, and (with
+# claude.wip_branch) commits only on a wip/ branch. They replace the project's own hooks.
+hooks_env="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/etc/gleipnir/git-hooks;"
+
 # Claude works on its own wip/ branch; you review, merge and push
-hooks_env=""
 if [ -f /etc/gleipnir/claude-autocommit ]; then
   branch="$(as_dev git -C "$PROJECT" symbolic-ref --short -q HEAD || true)"
   case "$branch" in
@@ -45,8 +64,6 @@ if [ -f /etc/gleipnir/claude-autocommit ]; then
       echo "Gleipnir: Claude is working on branch $target"
       ;;
   esac
-  # A guard hook that refuses Claude's commits anywhere but a wip/ branch
-  hooks_env="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/etc/gleipnir/git-hooks;"
 fi
 
 # Heimdall: a snapshot before the session, kept where Claude can't touch it
@@ -56,14 +73,23 @@ if [ -f /etc/gleipnir/heimdall ]; then
   as_dev /usr/local/bin/heimdall-check --snapshot "$snap" "$PROJECT" || true
 fi
 
+started="$(date +%s)"
 cd /
-sudo -n -u claude -H bash -lc "$hooks_env"' cd /srv/project && exec "$0" "$@"' "$REAL" "$@"
+sudo -n -u claude -H env "${proxy_env[@]}" bash -lc "$hooks_env"' cd /srv/project && exec "$0" "$@"' "$REAL" "$@"
 status=$?
 
 # Heimdall: what changed during the session
 if [ -n "$snap" ]; then
   as_dev /usr/local/bin/heimdall-check --summary "$snap" "$PROJECT" || true
   as_dev rm -f "$snap"
+fi
+
+# Gjöll: anything blocked during the session
+if [ "$NETWORK" = "allowlist" ]; then
+  blocked="$(sudo -n /usr/local/sbin/gjoll-log --since "@$started" --user claude --brief 2>/dev/null || true)"
+  case "$blocked" in
+    "Gjöll: blocked"*) echo; printf '%s\n' "$blocked" ;;
+  esac
 fi
 
 exit "$status"

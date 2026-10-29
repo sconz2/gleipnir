@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Gleipnir: refuses commit messages from Claude that credit Claude or Anthropic:
+# any trailer (the "Something-By: ..." lines git keeps at the end of a message) that
+# mentions either, and "Generated with Claude Code" lines anywhere. Only applies inside
+# Claude's sessions; your own commits as dev aren't affected.
+
+# The message without git's "#" help lines, which git removes anyway
+message="$(grep -v '^#' "$1")"
+
+refuse() {
+  echo "Gleipnir: commit messages mustn't credit Claude or Anthropic ($1). Remove it and commit again." >&2
+  exit 1
+}
+
+# Trailers, found by git's own parser so they're read exactly as git reads them
+if printf '%s\n' "$message" | git interpret-trailers --parse | grep -qiE 'claude|anthropic'; then
+  refuse "a trailer mentions them"
+fi
+
+# The same attribution lines anywhere in the message, in case they aren't at the end
+if printf '%s\n' "$message" | grep -qiE '^[[:space:]]*(co-authored-by:.*(claude|anthropic)|claude-session:)|generated with \[?claude code'; then
+  refuse "an attribution line"
+fi
+exit 0
