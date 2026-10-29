@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Gleipnir: copy your branches into Claude's copy of the project, so it starts from your
+# latest work. They arrive in Claude's copy as trusted/<branch> (e.g. trusted/main).
+#
+#   gleipnir-sync      (run as root, by the claude command and by provisioning)
+#
+# Only data moves between the two copies: dev writes a git bundle of your branches, and
+# claude reads it. Nothing of Claude's runs as dev, and Claude never touches your copy.
+set -euo pipefail
+
+TRUSTED=/srv/project
+WORK=/srv/work
+
+[ -d "$TRUSTED/.git" ] || { echo "Gleipnir: your copy of the project isn't set up yet; provision first." >&2; exit 1; }
+[ -d "$WORK/.git" ] || { echo "Gleipnir: Claude's copy of the project isn't set up yet; provision first." >&2; exit 1; }
+
+# A new, empty repo has no branches to copy yet
+if [ -z "$(sudo -u dev -H git -C "$TRUSTED" for-each-ref --count=1 --format='%(refname)' refs/heads/)" ]; then
+  exit 0
+fi
+
+# The bundle is written by root, from git's output, into root's own folder: neither user
+# can swap it for something else on the way
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+chmod 0755 "$stage"
+# shellcheck disable=SC2024  # root writing the file is the point
+sudo -u dev -H git -C "$TRUSTED" bundle create --quiet - --branches > "$stage/trusted.bundle"
+chmod 0644 "$stage/trusted.bundle"
+sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null fetch --quiet --no-tags --prune "$stage/trusted.bundle" '+refs/heads/*:refs/remotes/trusted/*'

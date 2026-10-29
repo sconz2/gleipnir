@@ -25,16 +25,15 @@ EOF
 # The apps with a dev server: name, folder, port, command
 names() { cut -f1 "$LIST" 2>/dev/null; }
 
-# Run systemctl --user as dev: directly when we are dev, otherwise through sudo
-dev_systemctl() {
-  local runtime
-  runtime="/run/user/$(id -u dev)"
-  if [ "$(id -un)" = dev ]; then
-    XDG_RUNTIME_DIR="$runtime" systemctl --user "$@"
+# The dev servers are system services, run as runner. Anyone can see how they are; dev (the
+# editor's terminal, allowed by a polkit rule) and the admin user (with sudo) can control them.
+control() {
+  if [ "$(id -u)" -eq 0 ] || [ "$(id -un)" = dev ]; then
+    systemctl --no-ask-password "$@"
   elif sudo -n true 2>/dev/null; then
-    sudo -u dev env XDG_RUNTIME_DIR="$runtime" systemctl --user "$@"
+    sudo -n systemctl --no-ask-password "$@"
   else
-    echo "devserver: only dev (the editor's terminal) or the admin user can control the dev servers." >&2
+    echo "devserver: only dev (the editor's terminal) or the admin user can start and stop the dev servers." >&2
     exit 1
   fi
 }
@@ -75,31 +74,34 @@ done
 
 case "$command" in
   status)
-    dev_systemctl status --no-pager --lines=0 "${units[@]}" || true
+    systemctl status --no-pager --lines=0 "${units[@]}" || true
     ;;
   start|restart)
-    dev_systemctl reset-failed "${units[@]}" >/dev/null 2>&1 || true
-    dev_systemctl "$command" "${units[@]}"
+    control reset-failed "${units[@]}" >/dev/null 2>&1 || true
+    control "$command" "${units[@]}"
     echo "${command^}ed: ${targets[*]}. Output: devserver log -f${app:+ $app}"
     ;;
   stop)
-    dev_systemctl stop "${units[@]}"
+    control stop "${units[@]}"
     echo "Stopped: ${targets[*]}"
     ;;
   try-restart)
     # Restart only those that are running. Used after the .env files are updated.
     for unit in "${units[@]}"; do
-      if dev_systemctl is-active --quiet "$unit"; then
-        dev_systemctl restart "$unit"
+      if systemctl is-active --quiet "$unit"; then
+        control restart "$unit"
         echo "Dev server restarted: ${unit#gleipnir-dev@}" | sed 's/\.service$//'
       fi
     done
     ;;
   log|logs)
+    # Readable by dev and Claude; the admin user reads them with sudo
+    reader=()
+    if [ ! -r "$LOG_DIR" ] && sudo -n true 2>/dev/null; then reader=(sudo -n); fi
     if [ "$follow" = yes ]; then
-      exec tail -n 50 -F "${logs[@]}"
+      exec "${reader[@]}" tail -n 50 -F "${logs[@]}"
     else
-      exec tail -n 50 "${logs[@]}"
+      exec "${reader[@]}" tail -n 50 "${logs[@]}"
     fi
     ;;
   list)

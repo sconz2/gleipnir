@@ -1,41 +1,28 @@
 #!/usr/bin/env bash
-# Gleipnir: copy the project's context folder from your computer into the project,
-# as tmp/context. Your computer's copy wins: the folder is replaced each time, so
-# files removed there are removed here too. Claude can read it but not change it.
+# Gleipnir: copy the project's context folder from your computer to /srv/context, where
+# Claude can read it but not change, rename or replace it: it's owned by root and sits
+# outside both copies of the project. Your computer's copy wins: the folder is replaced each
+# time, so files removed there are removed here too.
 #
 #   gleipnir-context <folder>     (run as root, by provisioning)
 set -euo pipefail
 
 SRC_DIR="${1:?usage: gleipnir-context <folder>}"
-DEST=/srv/project
+DEST=/srv/context
 
 [ -d "$SRC_DIR" ] || { echo "Gleipnir: $SRC_DIR isn't a folder" >&2; exit 1; }
-[ -d "$DEST/.git" ] || { echo "Gleipnir: the project isn't set up yet; run a full provision first." >&2; exit 1; }
 
-# Hand dev a private copy, then do the rest as dev. The project is writable by
-# claude, so nothing in it is touched as root.
-stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
-cp -R "$SRC_DIR"/. "$stage"/
-chown -R dev:dev "$stage"
+# Built beside it, then swapped in. Links are dropped: context is plain files.
+rm -rf "$DEST.new" "$DEST.old"
+cp -R "$SRC_DIR" "$DEST.new"
+find "$DEST.new" -type l -delete
+chown -R root:project "$DEST.new"
+find "$DEST.new" -type d -exec chmod 0750 {} +
+find "$DEST.new" -type f -exec chmod 0640 {} +
+if [ -e "$DEST" ]; then mv "$DEST" "$DEST.old"; fi
+mv "$DEST.new" "$DEST"
+rm -rf "$DEST.old"
 
-sudo -u dev -H bash -s "$stage" <<'SH'
-set -euo pipefail
-stage="$1"
-cd /srv/project
-mkdir -p tmp
-rm -rf tmp/context
-cp -R "$stage" tmp/context
-setfacl -R -b tmp/context
-chgrp -R project tmp/context
-find tmp/context -type d -exec chmod 0750 {} +
-find tmp/context -type f -exec chmod 0640 {} +
-SH
-
-count="$(find "$DEST/tmp/context" -type f | wc -l)"
+count="$(find "$DEST" -type f | wc -l)"
 if [ "$count" -eq 1 ]; then files="1 file"; else files="$count files"; fi
-echo "Gleipnir: project context copied to tmp/context ($files)"
-
-if ! sudo -u dev git -C "$DEST" check-ignore -q tmp/context; then
-  echo "Gleipnir: WARNING: the project's .gitignore doesn't ignore tmp/. Add it, or the context files could be committed." >&2
-fi
+echo "Gleipnir: project context copied to $DEST ($files)"

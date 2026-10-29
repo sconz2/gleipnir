@@ -1,6 +1,13 @@
+# shellcheck shell=bash disable=SC2034  # sourced: its settings are used by the steps
 # Gleipnir: shared helpers. Sourced by each step, not run on its own.
 
 GLEIPNIR_CONFIG="${GLEIPNIR_CONFIG:-/etc/gleipnir/config.json}"
+
+# Where things live in the machine
+TRUSTED=/srv/project            # your copy of the project: dev's, which Claude can't change
+WORK=/srv/work                  # Claude's copy: where it works and the dev servers run
+CONTEXT_DIR=/srv/context        # background files for Claude, which it can read but not change
+RUNNER_HOME=/var/lib/gleipnir/runner
 
 log()  { echo "    $*"; }
 warn() { echo "    WARNING: $*" >&2; }
@@ -37,4 +44,15 @@ PY
 # Without "apps" in the config, the whole project is one app called "app" on port 5173.
 apps() {
   python3 -I "$GLEIPNIR_SRC/scripts/files/gleipnir-apps" "$GLEIPNIR_CONFIG"
+}
+
+# An app's folder in Claude's copy, as an absolute path, only if it's really there: a folder,
+# with no link anywhere along the way (a link could lead outside the copy). Fails otherwise.
+#   app_dir <folder>
+app_dir() {
+  local wanted resolved
+  wanted="$(realpath -m -s -- "$WORK/$1")"
+  resolved="$(realpath -e -- "$WORK/$1" 2>/dev/null)" || return 1
+  [ "$resolved" = "$wanted" ] && [ -d "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
 }

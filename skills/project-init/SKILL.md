@@ -10,7 +10,7 @@ The user has an empty, or almost empty, repo and wants you to set the project up
 
 ## 1. Get your bearings
 
-- Read `CLAUDE.md`, and everything in `tmp/context/` if it exists: it's background the user has gathered (what the project is, who it's for, requirements).
+- Read `CLAUDE.md`, and everything in `/srv/context/` if it exists: it's background the user has gathered (what the project is, who it's for, requirements).
 - Check your instructions for an **Apps** section. If there is one, the project is a monorepo: each app listed there gets its own folder, port and dev server, and you set up each one in its folder. If there isn't, the whole repo is one app.
 - Look at what's already in the repo. If an app is already there (a `package.json`, a `composer.json`, a `src/` folder), stop and ask whether they really want to set it up again.
 - Summarise in a few lines what you understand the project to be, and ask about anything that's unclear.
@@ -40,7 +40,7 @@ Work in the project root, or in each app's folder in a monorepo. Keep `CLAUDE.md
   - SvelteKit: `npx sv create <folder>`, choosing the confirmed options.
   - Laravel: `composer create-project laravel/laravel <folder>` (only if PHP is installed; see your instructions).
 - If a tool won't run in a folder that isn't empty, scaffold into a temporary folder inside `tmp/` and move the files across. Never overwrite an existing `.env`: Gleipnir copies the real one in from the user's computer.
-- Use npm and Composer. npm's install scripts are turned off for you, so if a package needs one to work (e.g. native modules, `prisma generate`), say so and ask the user to run that step in the editor's terminal.
+- Use npm and Composer. npm's install scripts are turned off by default, so if a package needs one to work (e.g. native modules, `prisma generate`), say which package and why, and only once the user agrees run it yourself (`npm rebuild <package> --ignore-scripts=false`, or the step's own command).
 - Dev servers: Gleipnir runs them for the user and adds the host and port itself. For a JavaScript app, the `dev` script must start the dev server with the framework's normal command (e.g. `vite dev`), without a host or port. For Laravel, Gleipnir runs `php artisan serve` itself.
 - Make sure each `.gitignore` covers at least: `node_modules/`, `vendor/`, `.env`, `.env.*` (but not `.env.example`), `tmp/`, `.claude-output/`, and the framework's build output. A monorepo can have one at the root for shared entries and one per app.
 - Create a `.env.example` for each app with every environment variable it reads, with safe placeholder values. Never write real secrets anywhere.
@@ -58,7 +58,7 @@ Some things can only be done from the user's computer. List the ones that apply,
 - **Database:** in their machine's config (`machines/<machine>.json`), set `postgres.enabled` to `true`, choose a user, password and database name, then provision. Put the matching settings (e.g. `DATABASE_URL`, or Laravel's `DB_*` values) in the app's `.env` file on their computer, not in the repo.
 - **PHP:** if they want a Laravel app but PHP isn't installed, set `php.enabled` to `true` in the machine's config and provision, then run /project-init again.
 - **Playwright:** set `playwright.enabled` to `true` in the machine's config and provision, so the browsers are installed. Don't run `playwright install` yourself.
-- **The first push:** the repo had no commits, so there's no `main` branch yet. Once they've reviewed and you've committed, they create it from your branch and push it, in the editor's terminal: `git switch -c main`, then `git push -u origin main`.
+- **The first push:** the repo had no commits, so there's no `main` branch yet. Once you've committed, your branch arrives in their copy of the project when this session ends (as `wip/<date>`). They review it, then create `main` from it and push it, in the editor's terminal: `git switch -c main wip/<date>`, then `git push -u origin main`.
 - **Sites you couldn't reach:** if anything needed a site outside your allowlist, say which, so they can add it to `claude.allowed_domains` or do that step themselves.
 
 ## 5. Finish

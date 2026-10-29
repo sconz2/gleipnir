@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Gleipnir: copy the project's .env files from your computer into the project.
-# Your computer's copies win: they replace the ones in the machine each time.
+# Gleipnir: copy the project's .env files from your computer into Claude's copy of the
+# project, where the apps run. Your computer's copies win: they replace the ones in the
+# machine each time.
 #
 #   gleipnir-env <file> <folder>     (run as root, by provisioning; "" for none)
 #
@@ -8,21 +9,22 @@
 #   <folder>  env/<machine>/: each <app>.env in it becomes that app's .env, in the
 #             app's folder (see "apps" in the machine's config)
 #
-# The copies are readable by dev and claude (for the app and its tests), nobody else.
+# The copies are readable by the apps and by Claude's tools, so keep production secrets
+# out of them.
 set -euo pipefail
 
 FILE="${1:-}"
 DIR="${2:-}"
-DEST=/srv/project
+WORK=/srv/work
 APPS=/usr/local/lib/gleipnir/gleipnir-apps
 
-[ -d "$DEST/.git" ] || { echo "Gleipnir: the project isn't set up yet; run a full provision first." >&2; exit 1; }
+[ -d "$WORK/.git" ] || { echo "Gleipnir: the project isn't set up yet; run a full provision first." >&2; exit 1; }
 
-# Hand dev a private copy of each file, then do the copying as dev. The project is
-# writable by claude, so nothing in it is touched as root.
+# Hand claude a private copy of each file, then do the copying as claude, which owns the copy
+# of the project they go into. Nothing in it is touched as root.
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
-# Each line: the file staged for dev, then where it goes in the project
+# Each line: the file staged for claude, then where it goes in the project
 : > "$stage/plan"
 
 if [ -n "$FILE" ]; then
@@ -48,10 +50,10 @@ if [ -n "$DIR" ]; then
   done
 fi
 
-chown -R dev:dev "$stage"
-sudo -u dev -H bash -s "$stage/plan" <<'SH'
+chown -R claude:claude "$stage"
+sudo -u claude -H bash -s "$stage/plan" <<'SH'
 set -euo pipefail
-cd /srv/project
+cd /srv/work
 while IFS=$'\t' read -r src folder; do
   where="$folder/.env"
   [ "$folder" = "." ] && where=".env"
@@ -61,7 +63,7 @@ while IFS=$'\t' read -r src folder; do
     continue
   fi
   # The folder must really be where the config says, with no link anywhere along the way
-  if [ "$(realpath -e -- "$folder" 2>/dev/null)" != "$(realpath -m -s -- "/srv/project/$folder")" ] \
+  if [ "$(realpath -e -- "$folder" 2>/dev/null)" != "$(realpath -m -s -- "/srv/work/$folder")" ] \
       || [ ! -d "$folder" ]; then
     echo "    WARNING: $folder isn't a plain folder in the project (a link?), so its .env wasn't copied" >&2
     continue

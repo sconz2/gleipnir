@@ -219,8 +219,8 @@ def main():
     if lines:
         print(f"Gjöll: blocked since {started}")
         print("\n".join(lines))
-        print("To allow a site, add it to claude.allowed_domains and provision. Names you don't recognise, "
-              "and any upload to a package site, are worth a look.")
+        print("To allow a site, add it to claude.allowed_domains (runner.allowed_domains for the dev servers) "
+              "and provision. Names you don't recognise, and any upload to a package site, are worth a look.")
     else:
         print(f"Gjöll: nothing blocked since {started}")
 

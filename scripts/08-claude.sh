@@ -12,6 +12,7 @@ FILES="$GLEIPNIR_SRC/scripts/files"
 SQUID_DIR=/etc/squid/gleipnir
 SSL_DB=/var/spool/squid/ssl_db
 CLAUDE_ENV=/etc/gleipnir/claude-env   # the proxy settings, read by the claude launcher
+RUNNER_ENV=/etc/gleipnir/runner-env   # the same for the dev servers, read by their service
 PROXY_CA=/etc/gleipnir/proxy-ca.crt   # the proxy's certificate authority (public part)
 CA_BUNDLE=/etc/gleipnir/ca-bundle.pem # what claude's tools trust: the system's, plus that
 CA_HOOK=/etc/ca-certificates/update.d/gleipnir-ca-bundle
@@ -93,12 +94,13 @@ fi
 
 # The sites each user may reach. "example.com" is that name only; ".example.com" or
 # "*.example.com" is example.com and everything under it.
-python3 -I - "$SQUID_DIR/claude-domains" "$(cfg claude.allowed_domains '')" "${packages[@]}" <<'PY'
+#   site_list <config key> <file> [built-in sites...]
+site_list() {
+  local key="$1" file="$2"; shift 2
+  python3 -I - "$key" "$file" "$(cfg "$key" '')" "${packages[*]}" "$@" <<'PY'
 import re, sys
-# What Claude Code needs (Anthropic's network requirements), and the package sites
-packages = sys.argv[3:]
-builtin = ["api.anthropic.com", "claude.ai", "platform.claude.com"] + packages
-extra = sys.argv[2].split("\n")
+key, path, extra, packages = sys.argv[1], sys.argv[2], sys.argv[3].split("\n"), sys.argv[4].split()
+builtin = sys.argv[5:]
 # Names only: the last part must have a letter in it, so addresses like 1.2.3.4 don't count
 valid = re.compile(r"^\.?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?$")
 names = set()
@@ -109,14 +111,14 @@ for raw in builtin + extra:
     if name.startswith("*."):
         name = name[1:]
     if not valid.match(name):
-        sys.exit(f"claude.allowed_domains: \"{raw.strip()}\" isn't a site name (use e.g. docs.example.com or .example.com)")
+        sys.exit(f"{key}: \"{raw.strip()}\" isn't a site name (use e.g. docs.example.com or .example.com)")
     names.add(name)
     # A wildcard over a package site lets its neighbours through without the downloads-only
     # check (".github.com" lets uploads.github.com through, for example). Allowed, but said.
     if raw not in builtin and name.startswith("."):
         covered_packages = [p for p in packages if p.endswith(name)]
         if covered_packages:
-            print(f"    WARNING: claude.allowed_domains: {raw.strip()} also allows sites next to "
+            print(f"    WARNING: {key}: {raw.strip()} also allows sites next to "
                   f"{', '.join(covered_packages)}, which aren't limited to downloads", file=sys.stderr)
 # Squid refuses lists where one entry covers another, so keep only the widest
 wide = {n[1:] for n in names if n.startswith(".")}
@@ -126,12 +128,17 @@ def covered(n):
     parents = {".".join(parts[i:]) for i in range(1, len(parts))}
     return (not n.startswith(".") and bare in wide) or bool(parents & wide)
 kept = sorted(n for n in names if not covered(n))
-with open(sys.argv[1], "w") as fh:
-    fh.write("# Managed by Gleipnir: set claude.allowed_domains in the machine's config\n")
-    fh.write("\n".join(kept) + "\n")
+with open(path, "w") as fh:
+    fh.write(f"# Managed by Gleipnir: set {key} in the machine's config\n")
+    if kept:
+        fh.write("\n".join(kept) + "\n")
 PY
-# The dev servers' list: empty until they get their own user
-echo "# Managed by Gleipnir" > "$SQUID_DIR/runner-domains"
+}
+# Claude's: what Claude Code needs (Anthropic's network requirements), and the package sites
+site_list claude.allowed_domains "$SQUID_DIR/claude-domains" api.anthropic.com claude.ai platform.claude.com "${packages[@]}"
+# The dev servers': only what you list. They run the project's code, so by default they
+# reach nothing outside the machine.
+site_list runner.allowed_domains "$SQUID_DIR/runner-domains"
 chmod 0644 "$SQUID_DIR/claude-domains" "$SQUID_DIR/runner-domains" "$SQUID_DIR/package-domains"
 
 # The proxy's own certificate authority, made once per machine. Squid signs a certificate
@@ -191,30 +198,32 @@ Restart=on-failure
 RestartSec=5
 EOF
 
-# --- The settings for claude's tools ----------------------------------------------------
+# --- The settings for claude's tools, and the dev servers' ----------------------------------
 # The proxy, in both spellings, since tools disagree on which they read. NO_PROXY keeps
-# localhost (the dev server, the database) direct. NODE_USE_ENV_PROXY makes Node's built-in
+# localhost (the dev servers, the database) direct. NODE_USE_ENV_PROXY makes Node's built-in
 # fetch use them. The certificate settings make each kind of tool trust the proxy's
 # authority as well as the usual ones: OpenSSL, PHP and Composer (SSL_CERT_FILE), curl,
 # Python's requests, and Node and npm (NODE_EXTRA_CA_CERTS).
+proxy_settings() { # port
+  local proxy="http://127.0.0.1:$1"
+  echo "HTTPS_PROXY=$proxy"
+  echo "https_proxy=$proxy"
+  echo "HTTP_PROXY=$proxy"
+  echo "http_proxy=$proxy"
+  echo "NO_PROXY=localhost,127.0.0.1,::1"
+  echo "no_proxy=localhost,127.0.0.1,::1"
+  echo "NODE_USE_ENV_PROXY=1"
+  echo "SSL_CERT_FILE=$CA_BUNDLE"
+  echo "CURL_CA_BUNDLE=$CA_BUNDLE"
+  echo "REQUESTS_CA_BUNDLE=$CA_BUNDLE"
+  echo "NODE_EXTRA_CA_CERTS=$PROXY_CA"
+}
 if [ "$NETWORK" = "allowlist" ]; then
-  proxy=http://127.0.0.1:3128
-  {
-    echo "HTTPS_PROXY=$proxy"
-    echo "https_proxy=$proxy"
-    echo "HTTP_PROXY=$proxy"
-    echo "http_proxy=$proxy"
-    echo "NO_PROXY=localhost,127.0.0.1,::1"
-    echo "no_proxy=localhost,127.0.0.1,::1"
-    echo "NODE_USE_ENV_PROXY=1"
-    echo "SSL_CERT_FILE=$CA_BUNDLE"
-    echo "CURL_CA_BUNDLE=$CA_BUNDLE"
-    echo "REQUESTS_CA_BUNDLE=$CA_BUNDLE"
-    echo "NODE_EXTRA_CA_CERTS=$PROXY_CA"
-  } > "$CLAUDE_ENV"
-  chmod 0644 "$CLAUDE_ENV"
+  proxy_settings 3128 > "$CLAUDE_ENV"
+  proxy_settings 3129 > "$RUNNER_ENV"
+  chmod 0644 "$CLAUDE_ENV" "$RUNNER_ENV"
 else
-  rm -f "$CLAUDE_ENV"
+  rm -f "$CLAUDE_ENV" "$RUNNER_ENV"
 fi
 
 # --- Týr: managed settings ---------------------------------------------------------
@@ -271,21 +280,21 @@ json.dump(settings, sys.stdout, indent=2)
 print()
 PY
 chmod 0644 /etc/claude-code/managed-settings.json
-# Claude's instructions, /etc/claude-code/CLAUDE.md, are written by 10-claude-md.sh
+# Claude's instructions, /etc/claude-code/CLAUDE.md, are written by 11-claude-md.sh
 
-# --- No name lookups for claude through systemd-resolved ---------------------------------
+# --- No name lookups through systemd-resolved, for claude or the dev servers -------------
 # Gjöll blocks DNS on the network, but resolved also answers over D-Bus and a socket in
-# /run/systemd/resolve. Close both to claude, in allowlist mode only (open mode needs DNS).
+# /run/systemd/resolve. Close both to them, in allowlist mode only (open mode needs DNS).
 if [ "$NETWORK" = "allowlist" ]; then
   install -m 0644 "$FILES/gleipnir-resolve1.conf" "$DBUS_POLICY"
   install -d -m 0755 "$(dirname "$RESOLVED_DROPIN")"
   # Applied each time resolved starts (the folder is kept across restarts, so this matters
   # at boot). "+" runs it outside resolved's sandbox; "-" means a failure can't stop resolved.
-  printf '[Service]\nExecStartPost=-+/usr/bin/setfacl -m u:claude:--- /run/systemd/resolve\n' > "$RESOLVED_DROPIN"
-  [ -d /run/systemd/resolve ] && setfacl -m u:claude:--- /run/systemd/resolve
+  printf '[Service]\nExecStartPost=-+/usr/bin/setfacl -m u:claude:---,u:runner:--- /run/systemd/resolve\n' > "$RESOLVED_DROPIN"
+  [ -d /run/systemd/resolve ] && setfacl -m u:claude:---,u:runner:--- /run/systemd/resolve
 else
   rm -f "$DBUS_POLICY" "$RESOLVED_DROPIN"
-  [ -d /run/systemd/resolve ] && setfacl -x u:claude /run/systemd/resolve 2>/dev/null || true
+  [ -d /run/systemd/resolve ] && setfacl -x u:claude,u:runner /run/systemd/resolve 2>/dev/null || true
 fi
 systemctl reload dbus 2>/dev/null || true
 
@@ -296,7 +305,7 @@ rm -f /etc/systemd/system/gjoll-firewall.timer /etc/gleipnir/allowed-domains
 
 cat > /etc/systemd/system/gjoll-firewall.service <<'EOF'
 [Unit]
-Description=Gleipnir: Gjöll, the firewall for claude, the proxy and the database
+Description=Gleipnir: Gjöll, the firewall for claude, the dev servers, the proxy and the database
 Before=squid.service
 
 [Service]
@@ -317,7 +326,7 @@ systemctl restart squid
 
 /usr/local/sbin/gjoll-firewall --verify || fail "Gjöll didn't verify; Claude would not be contained"
 if [ "$NETWORK" = "open" ]; then
-  warn "claude.network is \"open\": Claude can reach any site. Its connections are logged (sudo journalctl -k | grep gjoll)."
+  warn "claude.network is \"open\": Claude and the dev servers can reach any site. Their connections are logged (sudo journalctl -k | grep gjoll)."
 fi
 
 log "Claude Code ready. Run: vagrant ssh <machine>, then: claude"

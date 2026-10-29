@@ -16,7 +16,7 @@ NETWORK="$(cfg claude.network allowlist)"
 PLAYWRIGHT="$(cfg playwright.enabled false)"
 PHP="$(cfg php.enabled false)"
 PHP_VERSION="$(cfg php.version 8.4)"
-if [ -n "${GLEIPNIR_CONTEXT:-}" ]; then CONTEXT=true; else CONTEXT=false; fi
+if [ -d "$CONTEXT_DIR" ] && [ -n "$(ls -A "$CONTEXT_DIR")" ]; then CONTEXT=true; else CONTEXT=false; fi
 if [ -n "$(cfg apps '')" ]; then APPS_MODE=true; else APPS_MODE=false; fi
 
 install -d -m 0755 /etc/claude-code

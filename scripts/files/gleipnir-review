@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Gleipnir: bring Claude's work into your copy of the project, for you to review and merge.
+# A wip/ branch of Claude's arrives in your copy (/srv/project) under the same name; any
+# other branch arrives as claude/<name>, so nothing of yours (main) can be replaced.
+#
+#   sudo gleipnir-review             Claude's current branch
+#   sudo gleipnir-review wip/<date>  a branch you name
+#
+# Only data moves between the two copies: claude writes a git bundle of the branch, and dev
+# reads it, checking every object. Nothing of Claude's (hooks, git settings, scripts) runs as
+# dev. Heimdall then checks what the branch itself changes, which is what you'd merge.
+# The claude command does all this for you when a session ends.
+set -euo pipefail
+
+TRUSTED=/srv/project
+WORK=/srv/work
+
+[ "$(id -u)" -eq 0 ] || { echo "gleipnir-review: run it with sudo" >&2; exit 1; }
+if [ ! -d "$TRUSTED/.git" ] || [ ! -d "$WORK/.git" ]; then
+  echo "Gleipnir: the project isn't set up yet; provision first." >&2
+  exit 1
+fi
+
+# Claude's own hooks and git settings aren't needed for this, so they're switched off
+as_claude() { sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
+as_dev() { sudo -u dev -H git -C "$TRUSTED" "$@"; }
+
+branch="${1:-}"
+if [ -z "$branch" ]; then
+  branch="$(as_claude symbolic-ref --short -q HEAD || true)"
+fi
+# Plain branch names only
+if ! [[ "$branch" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$ ]] \
+    || [[ "$branch" == *..* ]] || [[ "$branch" == *.lock ]] || [[ "$branch" == *.lock/* ]] \
+    || ! git check-ref-format "refs/heads/$branch"; then
+  echo "Gleipnir: Claude's copy isn't on a branch it can bring across (\"${branch:-no branch}\"); name one, e.g. sudo gleipnir-review wip/2026-10-29" >&2
+  exit 1
+fi
+case "$branch" in
+  wip/*) dest="$branch" ;;
+  *)     dest="claude/$branch" ;;
+esac
+
+# Changes Claude hasn't committed stay behind; say so
+uncommitted="$(as_claude status --porcelain --untracked-files=normal 2>/dev/null | wc -l || true)"
+note_uncommitted() {
+  if [ "${uncommitted:-0}" -gt 0 ]; then
+    echo "  Claude's copy also has $uncommitted uncommitted change(s), which stay there. Ask Claude to commit them to bring them across."
+  fi
+}
+
+if ! as_claude rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+  echo "Gleipnir: $branch has no commits in Claude's copy yet; nothing to bring across."
+  note_uncommitted
+  exit 0
+fi
+if [ "$(as_dev symbolic-ref --short -q HEAD || true)" = "$dest" ]; then
+  echo "Gleipnir: your copy has $dest checked out, so it can't be updated. Switch to main first: git switch main" >&2
+  exit 1
+fi
+
+# The bundle is written by root, from git's output, into root's own folder: Claude can't swap
+# it for something else before dev reads it
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+chmod 0755 "$stage"
+as_claude bundle create --quiet - "refs/heads/$branch" > "$stage/work.bundle"
+chmod 0644 "$stage/work.bundle"
+as_dev -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
+  fetch --quiet --no-tags --no-write-fetch-head "$stage/work.bundle" "+refs/heads/$branch:refs/heads/$dest"
+
+# What arrived, compared with the branch you're on (usually main)
+base="$(as_dev symbolic-ref --short -q HEAD || true)"
+if [ -n "$base" ] && ! as_dev rev-parse --verify --quiet "refs/heads/$base^{commit}" >/dev/null; then
+  base=""
+fi
+if [ -n "$base" ] && ! as_dev merge-base "$base" "$dest" >/dev/null; then
+  echo "Gleipnir: Claude's work is in your copy as $dest, but it has no history in common with $base."
+  echo "  Look through it with: git log $dest"
+elif [ -n "$base" ]; then
+  commits="$(as_dev rev-list --count "$base..$dest")"
+  files="$(as_dev diff --name-only "$base...$dest" | wc -l)"
+  echo "Gleipnir: Claude's work is in your copy as $dest: $commits commit(s), $files file(s) changed since $base."
+  echo "  Review:  git diff $base...$dest"
+  echo "  Merge:   git merge --squash $dest, then git commit"
+else
+  echo "Gleipnir: Claude's work is in your copy as $dest."
+  echo "  Your copy has no commits of its own yet. To make it your main branch: git switch -c main $dest"
+fi
+note_uncommitted
+
+# Heimdall, on the branch's commits, in your copy
+if [ -f /etc/gleipnir/heimdall ]; then
+  echo
+  timeout 120 sudo -u dev -H /usr/local/bin/heimdall-check --review "$TRUSTED" "${base:+refs/heads/$base}" "refs/heads/$dest" \
+    || echo "Heimdall: the check didn't finish; review the branch's changes by hand"
+fi

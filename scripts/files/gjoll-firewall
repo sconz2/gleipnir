@@ -6,14 +6,16 @@
 #             the proxy (Squid), which checks every site by name. No DNS, so it
 #             can't look names up or smuggle data out in lookups. In open mode:
 #             anything, logged.
+#   runner    The dev servers: the same, with a port of its own on the proxy and its
+#             own list of sites (runner.allowed_domains, empty unless you add some).
 #   proxy     Squid itself: HTTPS (port 443) out, and localhost, which includes
 #             the machine's DNS resolver. Nothing else. (Squid decrypts the package
 #             sites to check each request, so it makes those connections itself.)
 #   postgres  The database server: localhost (but not the proxy), and replies to
 #             connections made to it. It never needs to connect out.
 #
-# In every mode, claude can't connect to the editor (port 8080), which has no
-# password and would otherwise give it a terminal as dev.
+# In every mode, claude and runner can't connect to the editor (port 8080), which
+# would give them a terminal as dev.
 #
 #   gjoll-firewall             apply the rules if missing
 #   gjoll-firewall --rebuild   remove and re-create the rules
@@ -25,8 +27,9 @@ set -uo pipefail
 MODE="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
 EDITOR_PORT=8080
 CLAUDE_PROXY_PORT=3128
-# Not claude's: the dev servers' proxy port, and Squid's inner ports
-OTHER_PROXY_PORTS=3129,3138,3139
+RUNNER_PROXY_PORT=3129
+# Squid's inner ports, which only Squid itself may use
+INNER_PROXY_PORTS=3138,3139
 # Read by gjoll-log, so this script's own DNS test isn't reported as a blocked lookup
 CHECK_TIMES=/var/lib/gleipnir/dns-check-times
 # The certificates claude's tools trust: the system's, plus the proxy's own for the package sites
@@ -35,7 +38,7 @@ CA_BUNDLE=/etc/gleipnir/ca-bundle.pem
 LOG_LIMIT=(-m limit --limit 10/min --limit-burst 20)
 
 # Each user Gjöll covers, and its chain
-declare -A CHAINS=([claude]=GJOLL [proxy]=GJOLL_PROXY [postgres]=GJOLL_PG)
+declare -A CHAINS=([claude]=GJOLL [runner]=GJOLL_RUN [proxy]=GJOLL_PROXY [postgres]=GJOLL_PG)
 
 user_exists() { id -u "$1" >/dev/null 2>&1; }
 
@@ -50,14 +53,18 @@ rules_present() {
       user_exists "$user" || continue
       jump_present "$ipt" "$user" "${CHAINS[$user]}" || return 1
     done
-    # The rules that matter most: claude kept out of the editor, and the final verdict
-    "$ipt" -C GJOLL -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset >/dev/null 2>&1 || return 1
-    if [ "$MODE" = "open" ]; then
-      "$ipt" -C GJOLL -j ACCEPT >/dev/null 2>&1 || return 1
-    else
-      "$ipt" -C GJOLL -o lo -p tcp --dport "$CLAUDE_PROXY_PORT" -j ACCEPT >/dev/null 2>&1 || return 1
-      "$ipt" -C GJOLL -j REJECT >/dev/null 2>&1 || return 1
-    fi
+    # The rules that matter most: claude and runner kept out of the editor, and the final verdict
+    local chain port
+    for chain in GJOLL GJOLL_RUN; do
+      [ "$chain" = GJOLL ] && port="$CLAUDE_PROXY_PORT" || port="$RUNNER_PROXY_PORT"
+      "$ipt" -C "$chain" -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset >/dev/null 2>&1 || return 1
+      if [ "$MODE" = "open" ]; then
+        "$ipt" -C "$chain" -j ACCEPT >/dev/null 2>&1 || return 1
+      else
+        "$ipt" -C "$chain" -o lo -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
+        "$ipt" -C "$chain" -j REJECT >/dev/null 2>&1 || return 1
+      fi
+    done
   done
 }
 
@@ -97,30 +104,34 @@ swap_in() { # ipt user chain
   "$ipt" -E "$chain.new" "$chain"
 }
 
-build_claude() { # ipt chain
-  local ipt="$1" c="$2"
+# claude and runner: the same rules, each with its own port on the proxy
+build_contained() { # ipt chain user own-port other-port
+  local ipt="$1" c="$2" user="$3" own="$4" other="$5"
   "$ipt" -A "$c" -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset
   if [ "$MODE" = "open" ]; then
     "$ipt" -A "$c" -o lo -j ACCEPT
     "$ipt" -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    "$ipt" -A "$c" -m conntrack --ctstate NEW -j LOG --log-prefix "gjoll claude: " --log-uid
+    "$ipt" -A "$c" -m conntrack --ctstate NEW -j LOG --log-prefix "gjoll $user: " --log-uid
     "$ipt" -A "$c" -j ACCEPT
   else
     # No DNS, including the machine's own resolver on 127.0.0.53. Logged: it usually
     # means a tool that isn't using the proxy.
     local proto
     for proto in udp tcp; do
-      "$ipt" -A "$c" -p "$proto" --dport 53 "${LOG_LIMIT[@]}" -j LOG --log-prefix "gjoll claude blocked: " --log-uid
+      "$ipt" -A "$c" -p "$proto" --dport 53 "${LOG_LIMIT[@]}" -j LOG --log-prefix "gjoll $user blocked: " --log-uid
       "$ipt" -A "$c" -p "$proto" --dport 53 -j REJECT
     done
-    "$ipt" -A "$c" -o lo -p tcp --dport "$CLAUDE_PROXY_PORT" -j ACCEPT
-    "$ipt" -A "$c" -o lo -p tcp -m multiport --dports "$OTHER_PROXY_PORTS" -j REJECT --reject-with tcp-reset
-    # The rest of localhost: the dev server, the database
+    "$ipt" -A "$c" -o lo -p tcp --dport "$own" -j ACCEPT
+    "$ipt" -A "$c" -o lo -p tcp -m multiport --dports "$other,$INNER_PROXY_PORTS" -j REJECT --reject-with tcp-reset
+    # The rest of localhost: the dev servers, the database
     "$ipt" -A "$c" -o lo -j ACCEPT
     "$ipt" -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    log_and_reject "$ipt" "$c" claude
+    log_and_reject "$ipt" "$c" "$user"
   fi
 }
+
+build_claude() { build_contained "$1" "$2" claude "$CLAUDE_PROXY_PORT" "$RUNNER_PROXY_PORT"; }
+build_runner() { build_contained "$1" "$2" runner "$RUNNER_PROXY_PORT" "$CLAUDE_PROXY_PORT"; }
 
 build_proxy() { # ipt chain
   local ipt="$1" c="$2"
@@ -134,7 +145,7 @@ build_proxy() { # ipt chain
 build_postgres() { # ipt chain
   local ipt="$1" c="$2"
   # Not the proxy either: the database never needs to reach a website
-  "$ipt" -A "$c" -o lo -p tcp -m multiport --dports "$CLAUDE_PROXY_PORT,$OTHER_PROXY_PORTS" -j REJECT --reject-with tcp-reset
+  "$ipt" -A "$c" -o lo -p tcp -m multiport --dports "$CLAUDE_PROXY_PORT,$RUNNER_PROXY_PORT,$INNER_PROXY_PORTS" -j REJECT --reject-with tcp-reset
   "$ipt" -A "$c" -o lo -j ACCEPT
   # Replies to connections made to it, including your computer's through the forwarded port
   "$ipt" -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -145,7 +156,7 @@ build_postgres() { # ipt chain
 build_rules() {
   local ipt user chain
   for ipt in iptables ip6tables; do
-    for user in claude proxy postgres; do
+    for user in claude runner proxy postgres; do
       user_exists "$user" || continue
       chain="${CHAINS[$user]}"
       new_chain "$ipt" "$chain.new"
@@ -160,45 +171,66 @@ build_rules() {
   fi
 }
 
-# Does the claude user get through? (0 = it connected)
-as_claude_curl() {
-  sudo -u claude curl -s --max-time 8 -o /dev/null "$@"
+# Does the user get through? (0 = it connected)
+as_user_curl() { # user curl-args...
+  local user="$1"; shift
+  sudo -u "$user" curl -s --max-time 8 -o /dev/null "$@"
 }
+as_claude_curl() { as_user_curl claude "$@"; }
 
 verify() {
-  local failed=0 code address
+  local failed=0 code address user own other
 
-  if as_claude_curl "http://127.0.0.1:$EDITOR_PORT/healthz"; then
-    echo "Gjöll: ERROR: the claude user can reach the editor" >&2
-    failed=1
-  fi
+  for user in claude runner; do
+    user_exists "$user" || continue
+    if as_user_curl "$user" --noproxy '*' "http://127.0.0.1:$EDITOR_PORT/healthz"; then
+      echo "Gjöll: ERROR: the $user user can reach the editor" >&2
+      failed=1
+    fi
+  done
 
   if [ "$MODE" = "open" ]; then
     [ "$failed" -eq 0 ] && echo "Gjöll: verified (editor blocked; open network)"
     return "$failed"
   fi
 
-  # No DNS for claude. The time is noted so gjoll-log can leave this test's own lookups out.
+  # No DNS. The time is noted so gjoll-log can leave this test's own lookups out.
   install -d -m 0755 /var/lib/gleipnir
   { tail -n 49 "$CHECK_TIMES" 2>/dev/null; date +%s; } > "$CHECK_TIMES.new" && mv "$CHECK_TIMES.new" "$CHECK_TIMES"
-  if sudo -u claude getent ahosts example.com >/dev/null 2>&1; then
-    echo "Gjöll: ERROR: the claude user can look up names (DNS isn't blocked)" >&2
-    failed=1
-  fi
-
-  # No direct connections, even to an address that works for everyone else
   address="$(getent ahostsv4 example.com 2>/dev/null | awk 'NR == 1 { print $1 }')"
-  if [ -z "$address" ]; then
-    echo "Gjöll: WARNING: couldn't look up example.com to test direct connections" >&2
-  elif as_claude_curl --noproxy '*' -k "https://$address/"; then
-    echo "Gjöll: ERROR: the claude user can connect directly to $address, bypassing the proxy" >&2
-    failed=1
-  fi
+  [ -n "$address" ] || echo "Gjöll: WARNING: couldn't look up example.com to test direct connections" >&2
+  for user in claude runner; do
+    user_exists "$user" || continue
+    if [ "$user" = claude ]; then own="$CLAUDE_PROXY_PORT" other="$RUNNER_PROXY_PORT"; else own="$RUNNER_PROXY_PORT" other="$CLAUDE_PROXY_PORT"; fi
 
-  # Not the dev servers' proxy port, nor Squid's inner ports
-  if as_claude_curl --noproxy '*' "http://127.0.0.1:3139/" || as_claude_curl --noproxy '*' "http://127.0.0.1:3138/"; then
-    echo "Gjöll: ERROR: the claude user can reach a proxy port that isn't its own" >&2
-    failed=1
+    if sudo -u "$user" getent ahosts example.com >/dev/null 2>&1; then
+      echo "Gjöll: ERROR: the $user user can look up names (DNS isn't blocked)" >&2
+      failed=1
+    fi
+
+    # No direct connections, even to an address that works for everyone else
+    if [ -n "$address" ] && as_user_curl "$user" --noproxy '*' -k "https://$address/"; then
+      echo "Gjöll: ERROR: the $user user can connect directly to $address, bypassing the proxy" >&2
+      failed=1
+    fi
+
+    # Not the other user's proxy port, nor Squid's inner ports
+    if as_user_curl "$user" --noproxy '*' "http://127.0.0.1:$other/" \
+        || as_user_curl "$user" --noproxy '*' "http://127.0.0.1:3138/" \
+        || as_user_curl "$user" --noproxy '*' "http://127.0.0.1:3139/"; then
+      echo "Gjöll: ERROR: the $user user can reach a proxy port that isn't its own" >&2
+      failed=1
+    fi
+  done
+
+  # The dev servers' list is empty unless you add sites: the proxy refuses the rest
+  if user_exists runner; then
+    code="$(sudo -u runner curl -s --max-time 8 -o /dev/null -w '%{http_connect}' \
+      -x "http://127.0.0.1:$RUNNER_PROXY_PORT" https://gleipnir-check.invalid/ 2>/dev/null)"
+    case "$code" in
+      403|000) ;;
+      *) echo "Gjöll: ERROR: the proxy didn't refuse the dev servers a site that isn't on their list (answered $code)" >&2; failed=1 ;;
+    esac
   fi
 
   # The proxy refuses sites that aren't listed. This name doesn't exist and is never looked up.

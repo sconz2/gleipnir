@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Gleipnir: the `claude` command. Starts Claude Code as the restricted claude user,
-# in the project. Run it after `vagrant ssh <machine>`.
+# Gleipnir: the `claude` command. Starts Claude Code as the restricted claude user, in
+# Claude's copy of the project (/srv/work). Run it after `vagrant ssh <machine>`.
+#
+# Before the session it brings your latest branches into Claude's copy; afterwards it brings
+# Claude's branch into your copy (/srv/project) for you to review. Every git command in
+# Claude's copy runs as claude, never as dev or this admin user.
 set -uo pipefail
 
-PROJECT=/srv/project
+WORK=/srv/work
+TRUSTED=/srv/project
 REAL="$(cat /etc/gleipnir/claude-bin 2>/dev/null || echo /usr/bin/claude)"
 NETWORK="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
 
@@ -14,6 +19,11 @@ fi
 
 if ! sudo -n true 2>/dev/null; then
   echo "Gleipnir: start Claude from your own terminal: vagrant ssh <machine>, then claude." >&2
+  exit 1
+fi
+
+if [ ! -d "$WORK/.git" ]; then
+  echo "Gleipnir: Claude's copy of the project isn't set up yet; run a full provision first." >&2
   exit 1
 fi
 
@@ -39,48 +49,72 @@ if [ "$NETWORK" = "allowlist" ]; then
   fi
 fi
 
-# Git commands on the project run as dev, never as this admin user
+# Git in Claude's copy runs as claude; in yours, as dev. Never the other way round. The
+# launcher's own git commands in Claude's copy skip its hooks and fsmonitor setting.
+as_claude_git() { sudo -n -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 as_dev() { sudo -n -u dev -H "$@"; }
 
 # Gleipnir's git hooks for Claude's commits: no Claude attribution in messages, and (with
 # claude.wip_branch) commits only on a wip/ branch. They replace the project's own hooks.
 hooks_env="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/etc/gleipnir/git-hooks;"
 
-# Claude works on its own wip/ branch; you review, merge and push
+# Your latest branches, into Claude's copy as trusted/<branch>
+if ! sudo -n /usr/local/sbin/gleipnir-sync; then
+  echo "Gleipnir: WARNING: couldn't bring your latest branches into Claude's copy; it's working from the last ones it had." >&2
+fi
+
+# Claude works on its own wip/ branch, starting from your current branch (usually main)
 if [ -f /etc/gleipnir/claude-autocommit ]; then
-  branch="$(as_dev git -C "$PROJECT" symbolic-ref --short -q HEAD || true)"
+  branch="$(as_claude_git symbolic-ref --short -q HEAD || true)"
   case "$branch" in
     wip/*) ;;
     *)
       target="wip/$(date +%F)"
-      if as_dev git -C "$PROJECT" show-ref --verify --quiet "refs/heads/$target"; then
-        if ! as_dev git -C "$PROJECT" switch -q "$target"; then
-          echo "Gleipnir: couldn't switch to $target. Commit or stash your changes, then try again." >&2
-          exit 1
-        fi
+      base="$(as_dev git -C "$TRUSTED" symbolic-ref --short -q HEAD || echo main)"
+      if as_claude_git show-ref --verify --quiet "refs/heads/$target"; then
+        switched="$(as_claude_git switch -q "$target" 2>&1)"
+      elif as_claude_git rev-parse --verify --quiet "refs/remotes/trusted/$base" >/dev/null; then
+        switched="$(as_claude_git switch -q -c "$target" "trusted/$base" 2>&1)"
+      elif as_claude_git rev-parse --verify --quiet HEAD >/dev/null; then
+        switched="$(as_claude_git switch -q -c "$target" 2>&1)"
       else
-        as_dev git -C "$PROJECT" switch -q -c "$target"
+        # A brand-new repo with no commits yet
+        switched="$(as_claude_git symbolic-ref HEAD "refs/heads/$target" 2>&1)"
+      fi
+      if [ "$(as_claude_git symbolic-ref --short -q HEAD || true)" != "$target" ]; then
+        echo "Gleipnir: couldn't put Claude's copy on $target: it has uncommitted changes in the way." >&2
+        [ -n "$switched" ] && printf '%s\n' "$switched" | sed 's/^/  /' >&2
+        echo "Put them aside with: sudo -u claude -H git -C /srv/work stash -u" >&2
+        echo "then start Claude again and ask it to bring them back (git stash pop)." >&2
+        exit 1
       fi
       echo "Gleipnir: Claude is working on branch $target"
       ;;
   esac
 fi
 
-# Heimdall: a snapshot before the session, kept where Claude can't touch it
+# Heimdall: a snapshot before the session, kept where Claude can't touch it. It reads
+# Claude's copy as dev without running git or anything in it. (What reaches your copy is
+# checked again, commit by commit, when the branch is brought across.)
 snap=""
 if [ -f /etc/gleipnir/heimdall ]; then
   snap="$(as_dev mktemp)"
-  as_dev /usr/local/bin/heimdall-check --snapshot "$snap" "$PROJECT" || true
+  timeout 120 sudo -n -u dev -H /usr/local/bin/heimdall-check --snapshot "$snap" "$WORK" \
+    || echo "Gleipnir: Heimdall's snapshot didn't finish; its summary will be incomplete" >&2
 fi
 
 started="$(date +%s)"
 cd /
-sudo -n -u claude -H env "${proxy_env[@]}" bash -lc "$hooks_env"' cd /srv/project && exec "$0" "$@"' "$REAL" "$@"
+sudo -n -u claude -H env "${proxy_env[@]}" bash -lc "$hooks_env"' cd /srv/work && exec "$0" "$@"' "$REAL" "$@"
 status=$?
+# Ctrl+C from here on skips the step it interrupts, not the rest: Claude's branch is still
+# brought across at the end
+trap 'echo " (skipped)"' INT
 
 # Heimdall: what changed during the session
 if [ -n "$snap" ]; then
-  as_dev /usr/local/bin/heimdall-check --summary "$snap" "$PROJECT" || true
+  timeout 120 sudo -n -u dev -H /usr/local/bin/heimdall-check --summary "$snap" "$WORK" \
+    || echo "Heimdall: the check didn't finish; review the session's changes by hand"
   as_dev rm -f "$snap"
 fi
 
@@ -91,5 +125,9 @@ if [ "$NETWORK" = "allowlist" ]; then
     "Gjöll: blocked"*) echo; printf '%s\n' "$blocked" ;;
   esac
 fi
+
+# Claude's branch, into your copy for review
+echo
+sudo -n /usr/local/sbin/gleipnir-review || true
 
 exit "$status"
