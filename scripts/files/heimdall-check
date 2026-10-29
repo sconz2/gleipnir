@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gleipnir: Heimdall, the change checks. Flags changes to files that can run
-code (package scripts, tool configs, shell scripts), npm package changes, and
-new git settings or hooks that run commands.
+code (package scripts, tool configs, shell scripts), npm and Composer package
+changes (in every app's lock file), and new git settings or hooks that run commands.
 
 Claude Code hooks (set in the managed settings, run as the claude user):
   heimdall-check --hook-start     SessionStart: record a baseline
@@ -16,13 +16,15 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
 HEADER = "Heimdall: review these before merging Claude's work."
 
 # Folders never scanned (dependencies, build output, git internals)
-SKIP_DIRS = {"node_modules", ".git", ".svelte-kit", "build", "dist", ".next", ".nuxt", ".output", ".vercel"}
+SKIP_DIRS = {"node_modules", "vendor", "storage", ".git", ".svelte-kit", "build", "dist", ".next", ".nuxt",
+             ".output", ".vercel"}
 
 # Files that can make something run code
 SENSITIVE_NAMES = [
@@ -30,7 +32,12 @@ SENSITIVE_NAMES = [
     ".npmrc", ".yarnrc", ".yarnrc.yml", ".envrc", "Makefile", "Vagrantfile", "*.sh",
     "*.config.js", "*.config.cjs", "*.config.mjs", "*.config.ts", "*.config.cts", "*.config.mts",
     ".eslintrc*", ".prettierrc*", ".babelrc*",
+    # PHP: Composer's packages, scripts, plugins and credentials, and tools that load PHP files
+    "composer.json", "composer.lock", "auth.json", "artisan", "phpunit.xml", "phpunit.xml.dist",
+    "phpstan.neon", "phpstan.neon.dist", "rector.php", ".php-cs-fixer.php", ".php-cs-fixer.dist.php",
 ]
+# Lock files, whose packages are compared one by one
+LOCK_FILES = {"package-lock.json", "composer.lock"}
 # Every file inside these folders counts (editor tasks, IDE run configurations, git hook managers)
 SENSITIVE_DIRS = {".vscode", ".idea", ".husky"}
 # Changes constantly while you work
@@ -79,10 +86,33 @@ def sensitive_files(root):
     return sorted(found)
 
 
-def file_hash(path):
-    digest = hashlib.sha256()
+def open_regular(path):
+    """Open a file only if it's an ordinary file, not a link, pipe or device: those could
+    make the check hang or read something else. Returns None otherwise."""
     try:
-        with open(path, "rb") as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return os.fdopen(fd, "rb")
+
+
+def file_hash(path):
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return None
+    if not stat.S_ISREG(mode):
+        # A link, pipe or device where a file that can run code belongs: recorded as such
+        return f"not a plain file ({stat.filemode(mode)})"
+    digest = hashlib.sha256()
+    fh = open_regular(path)
+    if fh is None:
+        return None
+    try:
+        with fh:
             for chunk in iter(lambda: fh.read(65536), b""):
                 digest.update(chunk)
     except OSError:
@@ -90,16 +120,43 @@ def file_hash(path):
     return digest.hexdigest()
 
 
-def lock_packages(path):
+def lock_packages(root, rel):
+    """One lock file's packages, as {key: [name to show, version]}. A lock file that isn't
+    what it should be gives no packages, rather than stopping the check."""
+    fh = open_regular(os.path.join(root, rel))
+    if fh is None:
+        return {}
     try:
-        with open(path) as fh:
+        with fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    folder = os.path.dirname(rel)
+    prefix = f"{folder}: " if folder else ""
     packages = {}
-    for key, meta in (data.get("packages") or {}).items():
-        if key:
-            packages[key] = [key.split("node_modules/")[-1], (meta or {}).get("version", "")]
+    if os.path.basename(rel) == "composer.lock":
+        for section in ("packages", "packages-dev"):
+            entries = data.get(section)
+            for meta in entries if isinstance(entries, list) else []:
+                if isinstance(meta, dict) and isinstance(meta.get("name"), str) and meta["name"]:
+                    packages[f"{rel}|{meta['name']}"] = [prefix + meta["name"], str(meta.get("version", ""))]
+    else:
+        entries = data.get("packages")
+        for key, meta in (entries.items() if isinstance(entries, dict) else []):
+            if key and isinstance(key, str):
+                version = meta.get("version", "") if isinstance(meta, dict) else ""
+                packages[f"{rel}|{key}"] = [prefix + key.split("node_modules/")[-1], str(version)]
+    return packages
+
+
+def all_packages(root):
+    packages = {}
+    for parts, files in walk(root, MAX_DEPTH):
+        for name in files:
+            if name in LOCK_FILES:
+                packages.update(lock_packages(root, os.path.join(*parts, name) if parts else name))
     return packages
 
 
@@ -128,7 +185,7 @@ def git_state(root):
 def take_state(root):
     return {
         "files": {f: file_hash(os.path.join(root, f)) for f in sensitive_files(root)},
-        "packages": lock_packages(os.path.join(root, "package-lock.json")),
+        "packages": all_packages(root),
         "git": git_state(root),
     }
 
@@ -158,7 +215,7 @@ def diff_states(old, new):
 
     packages = package_changes(old.get("packages", {}), new["packages"])
     if packages:
-        lines.append("npm packages changed (check the names for typos or look-alikes):")
+        lines.append("Packages changed (check the names for typos or look-alikes):")
         lines += [f"  {p}" for p in packages[:30]]
         if len(packages) > 30:
             lines.append(f"  ...and {len(packages) - 30} more")
@@ -213,7 +270,10 @@ def run_hook(start):
 def run_summary(snapshot, directory):
     root = project_root(directory)
     old = load(snapshot)
-    lines = diff_states(old, take_state(root)) if old else ["(no snapshot was taken at the start of the session)"]
+    try:
+        lines = diff_states(old, take_state(root)) if old else ["(no snapshot was taken at the start of the session)"]
+    except Exception as exc:  # report the failure rather than skip the summary quietly
+        lines = [f"Heimdall: the check failed ({exc}); review the session's changes by hand"]
     print()
     if lines:
         print("=" * 72)

@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Gleipnir: the project's apps, from the machine's config. Prints one line per app,
+tab-separated: name, folder, port, devserver (true/false), command (may be empty).
+
+  gleipnir-apps [config.json]
+
+Without "apps" in the config, the whole project is one app called "app", whose dev
+server listens on port 5173 (Vagrant forwards it to ports.app on your computer).
+
+With "apps", each one has its own folder and port:
+  "apps": {
+    "frontend": { "port": 5175 },
+    "backend":  { "port": 8002, "path": "api", "devserver": { "command": "..." } }
+  }
+"path" defaults to the app's name. The port is the same inside the machine and on
+your computer. The top-level "devserver.enabled" turns every dev server on or off;
+an app's own "devserver.enabled" and "devserver.command" apply to that app only.
+"""
+import json
+import re
+import sys
+
+NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+PART = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+# Taken inside the machine: SSH, the proxy, the database, the editor
+RESERVED = {22, 3128, 3129, 3138, 3139, 5432, 8080}
+
+
+def fail(message):
+    sys.exit(f"apps: {message}")
+
+
+def main():
+    path = sys.argv[1] if len(sys.argv) > 1 else "/etc/gleipnir/config.json"
+    with open(path) as fh:
+        config = json.load(fh)
+
+    top = config.get("devserver") or {}
+    if not isinstance(top, dict):
+        fail('"devserver" must be an object, e.g. {"enabled": true}')
+    top_enabled = top.get("enabled", True) is not False
+
+    apps = config.get("apps")
+    if apps is None:
+        command = top.get("command") or ""
+        if not isinstance(command, str) or "\t" in command or "\n" in command:
+            fail("devserver.command must be one line of text")
+        print("\t".join(["app", ".", "5173", "true" if top_enabled else "false", command]))
+        return
+    if not isinstance(apps, dict) or not apps:
+        fail('"apps" must be an object with at least one app, e.g. {"frontend": {"port": 5175}}')
+
+    folders, ports = {}, {}
+    for name, app in apps.items():
+        if not NAME.match(name):
+            fail(f'"{name}": use only lowercase letters, digits and dashes in an app\'s name')
+        if not isinstance(app, dict):
+            fail(f'"{name}" must be an object, e.g. {{"port": 5175}}')
+        folder = app.get("path", name)
+        if not isinstance(folder, str) or not folder:
+            fail(f'"{name}": "path" must be a folder in the project, like "frontend"')
+        folder = folder.rstrip("/") or folder
+        if folder != "." and not all(PART.match(part) for part in folder.split("/")):
+            fail(f'"{name}": "path" must be a folder inside the project, like "frontend" or "apps/web"')
+        port = app.get("port")
+        if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
+            fail(f'"{name}": "port" is required, a number from 1024 to 65535')
+        if port in RESERVED:
+            fail(f'"{name}": port {port} is used by Gleipnir inside the machine; choose another')
+        if folder in folders:
+            fail(f'"{name}" and "{folders[folder]}" have the same folder')
+        if port in ports:
+            fail(f'"{name}" and "{ports[port]}" have the same port')
+        folders[folder], ports[port] = name, name
+
+        own = app.get("devserver") or {}
+        if not isinstance(own, dict):
+            fail(f'"{name}": "devserver" must be an object, e.g. {{"enabled": true}}')
+        enabled = top_enabled and own.get("enabled", True) is not False
+        command = own.get("command") or ""
+        if not isinstance(command, str) or "\t" in command or "\n" in command:
+            fail(f'"{name}": devserver.command must be one line of text')
+        print("\t".join([name, folder, str(port), "true" if enabled else "false", command]))
+
+
+if __name__ == "__main__":
+    main()

@@ -27,18 +27,24 @@ if [ "$(cfg playwright.enabled false)" != "true" ]; then
 fi
 
 # --- Which version: the one the project uses, so its browsers match -------------------
-# Only the version number is read from the project, and it's checked before use.
-VERSION="$(python3 -I - "$DEST/node_modules" <<'PY'
+# The first app with Playwright installed decides. Only the version number is read from
+# the project, as dev (claude can change the project), and it's checked before use.
+mapfile -t MODULES < <(apps | cut -f2 | sed "s#^#$DEST/#; s#\$#/node_modules#")
+VERSION="$(timeout 20 sudo -u dev python3 -I - "${MODULES[@]}" <<'PY'
 import json, os, sys
-for package in ("playwright-core", "playwright", "@playwright/test"):
-    try:
-        with open(os.path.join(sys.argv[1], package, "package.json")) as fh:
-            print(json.load(fh).get("version", ""))
-            break
-    except (OSError, ValueError):
-        pass
+def version():
+    for modules in sys.argv[1:]:
+        for package in ("playwright-core", "playwright", "@playwright/test"):
+            try:
+                with open(os.path.join(modules, package, "package.json")) as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            return str(data.get("version", "")) if isinstance(data, dict) else ""
+    return ""
+print(version())
 PY
-)"
+)" || VERSION=""
 if [ -z "$VERSION" ]; then
   VERSION=latest
   warn "The project doesn't use Playwright yet; installing browsers for the latest version. Provision again after adding it."

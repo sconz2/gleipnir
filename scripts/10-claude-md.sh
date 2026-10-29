@@ -14,22 +14,54 @@ OUT=/etc/claude-code/CLAUDE.md
 WIP_BRANCH="$(cfg claude.wip_branch "$(cfg claude.autocommit true)")"
 NETWORK="$(cfg claude.network allowlist)"
 PLAYWRIGHT="$(cfg playwright.enabled false)"
-DEVSERVER_COMMAND="$(cat /etc/gleipnir/devserver-command 2>/dev/null || true)"
+PHP="$(cfg php.enabled false)"
+PHP_VERSION="$(cfg php.version 8.4)"
 if [ -n "${GLEIPNIR_CONTEXT:-}" ]; then CONTEXT=true; else CONTEXT=false; fi
+if [ -n "$(cfg apps '')" ]; then APPS_MODE=true; else APPS_MODE=false; fi
 
 install -d -m 0755 /etc/claude-code
-trap 'rm -f "$OUT.new"' EXIT
-python3 -I - "$TEMPLATE" "$WIP_BRANCH" "$NETWORK" "$PLAYWRIGHT" "$DEVSERVER_COMMAND" "$CONTEXT" > "$OUT.new" <<'PY'
+apps_file="$(mktemp)"
+trap 'rm -f "$OUT.new" "$apps_file"' EXIT
+apps > "$apps_file"
+
+python3 -I - "$TEMPLATE" "$WIP_BRANCH" "$NETWORK" "$PLAYWRIGHT" "$CONTEXT" "$PHP" "$PHP_VERSION" \
+  "$APPS_MODE" "$apps_file" /etc/gleipnir/devservers > "$OUT.new" <<'PY'
 import re, sys
-template, wip_branch, network, playwright, devserver_command, context = sys.argv[1:7]
+(template, wip_branch, network, playwright, context, php, php_version,
+ apps_mode, apps_file, devservers_file) = sys.argv[1:11]
+
+def rows(path):
+    try:
+        with open(path) as fh:
+            return [line.rstrip("\n").split("\t") for line in fh if line.strip()]
+    except OSError:
+        return []
+
+apps = rows(apps_file)          # name, folder, port, devserver, command
+devservers = rows(devservers_file)  # name, folder, port, command
+
 facts = {
     "wip_branch": wip_branch == "true",
     "network=allowlist": network == "allowlist",
     "network=open": network == "open",
     "playwright": playwright == "true",
-    "devserver": devserver_command != "",
+    "devserver": bool(devservers),
     "context": context == "true",
+    "php": php == "true",
+    "apps": apps_mode == "true",
 }
+
+# Lines that stand for a generated list
+def apps_list():
+    return [f"- `{a[1]}/`: the {a[0]} app, on port {a[2]}" for a in apps]
+
+def devservers_list():
+    if len(devservers) == 1 and devservers[0][1] == ".":
+        name, _, port, command = devservers[0]
+        return [f"- The dev server runs `{command}` on port {port}."]
+    return [f"- {d[0]} (`{d[1]}/`): `{d[3]}` on port {d[2]}" for d in devservers]
+
+generated = {"{{apps}}": apps_list, "{{devservers}}": devservers_list}
 
 with open(template) as fh:
     text = fh.read()
@@ -58,8 +90,14 @@ for number, line in enumerate(lines[start:], start + 1):
             sys.exit(f"claude-instructions.md line {number}: {{{{end}}}} without an {{{{if}}}}")
         current, keep = None, True
         continue
-    if keep:
-        out.append(line.replace("{{devserver_command}}", devserver_command))
+    if not keep:
+        continue
+    if stripped in generated:
+        out += generated[stripped]()
+    else:
+        # {{devserver_command}} is from earlier versions, which had one dev server
+        first_command = devservers[0][3] if devservers else ""
+        out.append(line.replace("{{php_version}}", php_version).replace("{{devserver_command}}", first_command))
 if current:
     sys.exit(f"claude-instructions.md: {{{{if {current}}}}} is never closed with {{{{end}}}}")
 

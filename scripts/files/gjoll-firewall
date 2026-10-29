@@ -7,7 +7,8 @@
 #             can't look names up or smuggle data out in lookups. In open mode:
 #             anything, logged.
 #   proxy     Squid itself: HTTPS (port 443) out, and localhost, which includes
-#             the machine's DNS resolver. Nothing else.
+#             the machine's DNS resolver. Nothing else. (Squid decrypts the package
+#             sites to check each request, so it makes those connections itself.)
 #   postgres  The database server: localhost (but not the proxy), and replies to
 #             connections made to it. It never needs to connect out.
 #
@@ -26,6 +27,10 @@ EDITOR_PORT=8080
 CLAUDE_PROXY_PORT=3128
 # Not claude's: the dev servers' proxy port, and Squid's inner ports
 OTHER_PROXY_PORTS=3129,3138,3139
+# Read by gjoll-log, so this script's own DNS test isn't reported as a blocked lookup
+CHECK_TIMES=/var/lib/gleipnir/dns-check-times
+# The certificates claude's tools trust: the system's, plus the proxy's own for the package sites
+CA_BUNDLE=/etc/gleipnir/ca-bundle.pem
 # Blocked attempts are logged, but no faster than this, so a retry loop can't flood the log
 LOG_LIMIT=(-m limit --limit 10/min --limit-burst 20)
 
@@ -173,7 +178,9 @@ verify() {
     return "$failed"
   fi
 
-  # No DNS for claude
+  # No DNS for claude. The time is noted so gjoll-log can leave this test's own lookups out.
+  install -d -m 0755 /var/lib/gleipnir
+  { tail -n 49 "$CHECK_TIMES" 2>/dev/null; date +%s; } > "$CHECK_TIMES.new" && mv "$CHECK_TIMES.new" "$CHECK_TIMES"
   if sudo -u claude getent ahosts example.com >/dev/null 2>&1; then
     echo "Gjöll: ERROR: the claude user can look up names (DNS isn't blocked)" >&2
     failed=1
@@ -206,6 +213,60 @@ verify() {
   # And lets Anthropic through
   if [ "$code" = "403" ] && ! as_claude_curl -x "http://127.0.0.1:$CLAUDE_PROXY_PORT" https://api.anthropic.com; then
     echo "Gjöll: WARNING: the claude user can't reach api.anthropic.com through the proxy; Claude Code may not work" >&2
+  fi
+
+  # Package sites: decrypted, and only downloads allowed. Two uploads to npm must be refused
+  # by the proxy itself (its X-Squid-Error header says so): a plain one, and one sent after
+  # a CONNECT inside the decrypted connection, which would otherwise be passed through unchecked.
+  if [ "$code" = "403" ]; then
+    result="$(sudo -u claude python3 -I - "$CLAUDE_PROXY_PORT" "$CA_BUNDLE" <<'PY' 2>/dev/null || echo "error"
+import socket, ssl, sys
+port, bundle, site = int(sys.argv[1]), sys.argv[2], "registry.npmjs.org"
+
+def head(sock):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    return data.split(b"\r\n\r\n")[0].decode("latin-1")
+
+def refused_by_proxy(headers):
+    lines = headers.split("\r\n")
+    return " 403 " in lines[0] + " " and any(l.lower().startswith("x-squid-error: err_access_denied") for l in lines)
+
+def tunnel():
+    sock = socket.create_connection(("127.0.0.1", port), timeout=15)
+    sock.sendall(f"CONNECT {site}:443 HTTP/1.1\r\nHost: {site}:443\r\n\r\n".encode())
+    if " 200 " not in head(sock).split("\r\n")[0] + " ":
+        raise OSError("no tunnel")
+    return ssl.create_default_context(cafile=bundle).wrap_socket(sock, server_hostname=site)
+
+try:
+    tls = tunnel()
+    tls.sendall(f"PUT /gleipnir-upload-check HTTP/1.1\r\nHost: {site}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}".encode())
+    plain = refused_by_proxy(head(tls))
+    tls = tunnel()
+    tls.sendall(f"CONNECT {site}:443 HTTP/1.1\r\nHost: {site}:443\r\n\r\n".encode())
+    tls.settimeout(5)
+    try:
+        nested = refused_by_proxy(head(tls))
+    except socket.timeout:
+        nested = False
+except (OSError, ssl.SSLError):
+    print("unreachable")
+    sys.exit(0)
+print("ok" if plain and nested else f"upload={'refused' if plain else 'NOT refused'} nested={'refused' if nested else 'NOT refused'}")
+PY
+)"
+    case "$result" in
+      ok) ;;
+      unreachable|error)
+        echo "Gjöll: WARNING: couldn't reach npm through the proxy to test that uploads are refused" >&2 ;;
+      *)
+        echo "Gjöll: ERROR: the proxy didn't refuse uploads to npm ($result)" >&2; failed=1 ;;
+    esac
   fi
 
   [ "$failed" -eq 0 ] && echo "Gjöll: verified"

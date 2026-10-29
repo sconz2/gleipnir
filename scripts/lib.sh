@@ -28,3 +28,13 @@ else:
     print(data)
 PY
 }
+
+# The project's apps, one per line, tab-separated:  name  folder  port  devserver  command
+#   folder     relative to the project ("." is the project itself)
+#   port       the port its dev server listens on inside the machine
+#   devserver  true or false
+#   command    its dev server command from the config, or empty to work it out
+# Without "apps" in the config, the whole project is one app called "app" on port 5173.
+apps() {
+  python3 -I "$GLEIPNIR_SRC/scripts/files/gleipnir-apps" "$GLEIPNIR_CONFIG"
+}

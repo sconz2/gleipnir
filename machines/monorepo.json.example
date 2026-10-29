@@ -1,0 +1,27 @@
+{
+  "repo": "git@github.com:your-username/your-monorepo.git",
+  "git": { "name": "Your Name", "email": "you@example.com" },
+  "vm": { "memory": 4096, "cpus": 2 },
+  "ports": { "editor": 8081, "db": 54321 },
+  "node": 24,
+  "php": { "enabled": true, "version": "8.4" },
+  "apps": {
+    "frontend": { "port": 5174 },
+    "backend": { "port": 8001 }
+  },
+  "devserver": { "enabled": true },
+  "playwright": { "enabled": false, "browsers": ["chromium"] },
+  "postgres": {
+    "enabled": true,
+    "version": 18,
+    "user": "app",
+    "password": "change-me",
+    "databases": ["my_project"]
+  },
+  "claude": {
+    "network": "allowlist",
+    "allowed_domains": [],
+    "wip_branch": true,
+    "checks": true
+  }
+}

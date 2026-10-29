@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Gleipnir: copy the project's .env files from your computer into the project.
+# Your computer's copies win: they replace the ones in the machine each time.
+#
+#   gleipnir-env <file> <folder>     (run as root, by provisioning; "" for none)
+#
+#   <file>    env/<machine>.env: becomes the project's own .env
+#   <folder>  env/<machine>/: each <app>.env in it becomes that app's .env, in the
+#             app's folder (see "apps" in the machine's config)
+#
+# The copies are readable by dev and claude (for the app and its tests), nobody else.
+set -euo pipefail
+
+FILE="${1:-}"
+DIR="${2:-}"
+DEST=/srv/project
+APPS=/usr/local/lib/gleipnir/gleipnir-apps
+
+[ -d "$DEST/.git" ] || { echo "Gleipnir: the project isn't set up yet; run a full provision first." >&2; exit 1; }
+
+# Hand dev a private copy of each file, then do the copying as dev. The project is
+# writable by claude, so nothing in it is touched as root.
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+# Each line: the file staged for dev, then where it goes in the project
+: > "$stage/plan"
+
+if [ -n "$FILE" ]; then
+  cp "$FILE" "$stage/project.env"
+  printf '%s\t%s\n' "$stage/project.env" "." >> "$stage/plan"
+fi
+
+if [ -n "$DIR" ]; then
+  declare -A folder_of=()
+  while IFS=$'\t' read -r name folder _; do
+    folder_of[$name]="$folder"
+  done < <(python3 -I "$APPS")
+  for src in "$DIR"/*.env; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src" .env)"
+    folder="${folder_of[$name]:-}"
+    if [ -z "$folder" ]; then
+      echo "Gleipnir: WARNING: env/<machine>/$name.env: the config has no app called \"$name\"; skipped" >&2
+      continue
+    fi
+    cp "$src" "$stage/$name.env"
+    printf '%s\t%s\n' "$stage/$name.env" "$folder" >> "$stage/plan"
+  done
+fi
+
+chown -R dev:dev "$stage"
+sudo -u dev -H bash -s "$stage/plan" <<'SH'
+set -euo pipefail
+cd /srv/project
+while IFS=$'\t' read -r src folder; do
+  where="$folder/.env"
+  [ "$folder" = "." ] && where=".env"
+  # Not yet: the app's folder appears when it's created (e.g. by /project-init)
+  if [ ! -e "$folder" ] && [ ! -L "$folder" ]; then
+    echo "    $folder/ doesn't exist yet; its .env will be copied on the first provision after it does"
+    continue
+  fi
+  # The folder must really be where the config says, with no link anywhere along the way
+  if [ "$(realpath -e -- "$folder" 2>/dev/null)" != "$(realpath -m -s -- "/srv/project/$folder")" ] \
+      || [ ! -d "$folder" ]; then
+    echo "    WARNING: $folder isn't a plain folder in the project (a link?), so its .env wasn't copied" >&2
+    continue
+  fi
+  if [ -d "$where" ] && [ ! -L "$where" ]; then
+    echo "    WARNING: $where is a folder, so it wasn't replaced" >&2
+    continue
+  fi
+  # Written beside it, then renamed over it: a link left in its place is replaced, not followed
+  tmp="$(mktemp "$folder/.env.gleipnir.XXXXXX")"
+  cat "$src" > "$tmp"
+  chgrp project "$tmp"
+  chmod 0640 "$tmp"
+  if mv -f -T "$tmp" "$where"; then
+    echo "    Copied $where into the project"
+  else
+    rm -f "$tmp"
+    echo "    WARNING: couldn't copy $where into the project" >&2
+  fi
+done < "$1"
+SH

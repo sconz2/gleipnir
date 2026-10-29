@@ -6,44 +6,49 @@ source "$GLEIPNIR_SRC/scripts/lib.sh"
 
 REPO="$(cfg repo)"
 DEST=/srv/project
-DEV_HOME=/home/dev
 
 # --- Git access for dev: the repo's deploy key -------------------------------
-install -d -o dev -g dev -m 0700 "$DEV_HOME/.ssh"
+# Everything is prepared here, then put in place as dev. Code Claude runs can end up running
+# as dev (the dev servers run code Claude can edit), so nothing in dev's home is written as
+# root: a link left there could otherwise point root's writes anywhere.
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+
 if [ -n "${GLEIPNIR_KEY:-}" ]; then
-  install -o dev -g dev -m 0600 "$GLEIPNIR_KEY" "$DEV_HOME/.ssh/deploy_key"
+  cp "$GLEIPNIR_KEY" "$stage/deploy_key"
 fi
 
 # The git server's name, from git@host:…, ssh://…@host/… or https://host/…
 host="$(printf '%s' "$REPO" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#[:/].*$##')"
 
-if [ -f "$DEV_HOME/.ssh/deploy_key" ] && [ -n "$host" ]; then
-  cat > "$DEV_HOME/.ssh/config" <<EOF
-Host $host
-  IdentityFile ~/.ssh/deploy_key
-  IdentitiesOnly yes
-EOF
-  chown dev:dev "$DEV_HOME/.ssh/config"
-  chmod 0600 "$DEV_HOME/.ssh/config"
+if [ -n "${GLEIPNIR_KEY:-}" ] && [ -n "$host" ]; then
+  printf 'Host %s\n  IdentityFile ~/.ssh/deploy_key\n  IdentitiesOnly yes\n' "$host" > "$stage/config"
 fi
 
 # The server's SSH identity, so the first connection can't be impersonated
-known="$DEV_HOME/.ssh/known_hosts"
 if [ "$host" = "github.com" ]; then
   # GitHub publishes its host keys; fetch them over HTTPS
   curl -fsSL https://api.github.com/meta | python3 -I -c '
 import json, sys
 for key in json.load(sys.stdin)["ssh_keys"]:
-    print("github.com " + key)' > "$known.new"
-  mv "$known.new" "$known"
+    print("github.com " + key)' > "$stage/known_hosts"
 elif [ -n "$host" ]; then
   warn "Trusting $host's SSH key on first use"
-  ssh-keyscan "$host" > "$known" 2>/dev/null || true
+  ssh-keyscan "$host" > "$stage/known_hosts" 2>/dev/null || true
+  [ -s "$stage/known_hosts" ] || rm -f "$stage/known_hosts"
 fi
-if [ -f "$known" ]; then
-  chown dev:dev "$known"
-  chmod 0644 "$known"
-fi
+
+chown -R dev:dev "$stage"
+sudo -u dev -H bash -s "$stage" <<'SH'
+set -euo pipefail
+stage="$1"
+mkdir -p ~/.ssh
+chmod 0700 ~/.ssh
+# install replaces whatever is in the way, rather than writing through it
+if [ -f "$stage/deploy_key" ]; then install -m 0600 "$stage/deploy_key" ~/.ssh/deploy_key; fi
+if [ -f "$stage/config" ]; then install -m 0600 "$stage/config" ~/.ssh/config; fi
+if [ -f "$stage/known_hosts" ]; then install -m 0644 "$stage/known_hosts" ~/.ssh/known_hosts; fi
+SH
 
 # --- Git identity for dev ----------------------------------------------------
 git_name="$(cfg git.name '')"
@@ -70,9 +75,10 @@ if [ ! -d "$DEST/.git" ]; then
   sudo -u dev -H git clone "$REPO" "$DEST"
   sudo -u dev -H git -C "$DEST" config core.sharedRepository group
 
-  # Let the project group (dev and claude) edit everything, now and for new files
-  setfacl -R -m g:project:rwX "$DEST"
-  find "$DEST" -type d -exec setfacl -m d:g:project:rwX {} +
+  # Let the project group (dev and claude) edit everything, now and for new files.
+  # As dev, the owner, never as root: claude can already change the project.
+  sudo -u dev -H setfacl -R -m g:project:rwX "$DEST"
+  sudo -u dev -H find "$DEST" -type d -exec setfacl -m d:g:project:rwX {} +
 
   # Your starter CLAUDE.md, only on this first setup, and only if the project
   # doesn't already have one. After that it's the project's file, not Gleipnir's.
@@ -80,18 +86,21 @@ if [ ! -d "$DEST/.git" ]; then
     if [ -e "$DEST/CLAUDE.md" ] || [ -e "$DEST/.claude/CLAUDE.md" ]; then
       log "The project already has a CLAUDE.md; leaving it as it is"
     else
-      install -o dev -g project -m 0664 "$GLEIPNIR_CLAUDE_MD" "$DEST/CLAUDE.md"
+      install -o dev -g dev -m 0644 "$GLEIPNIR_CLAUDE_MD" "$stage/CLAUDE.md"
+      sudo -u dev -H install -m 0664 "$stage/CLAUDE.md" "$DEST/CLAUDE.md"
       log "Added your starter CLAUDE.md to the project"
     fi
   fi
 fi
 
-# --- The project's .env, copied from your computer ------------------------------
-# Your computer's copy wins: it replaces the one in the machine on every provision.
-# Readable by dev and claude (for the app and tests), nobody else.
-if [ -n "${GLEIPNIR_ENV:-}" ]; then
-  install -o dev -g project -m 0640 "$GLEIPNIR_ENV" "$DEST/.env"
-  log "Copied .env into the project"
+# --- The project's .env files, copied from your computer ------------------------------
+# Your computer's copies win: they replace the ones in the machine on every provision.
+# env/<machine>.env goes to the project's root; env/<machine>/<app>.env into each app's folder.
+install -d -m 0755 /usr/local/lib/gleipnir
+install -m 0755 "$GLEIPNIR_SRC/scripts/files/gleipnir-apps" /usr/local/lib/gleipnir/gleipnir-apps
+install -m 0755 "$GLEIPNIR_SRC/scripts/files/gleipnir-env" /usr/local/sbin/gleipnir-env
+if [ -n "${GLEIPNIR_ENV:-}" ] || [ -n "${GLEIPNIR_ENV_DIR:-}" ]; then
+  /usr/local/sbin/gleipnir-env "${GLEIPNIR_ENV:-}" "${GLEIPNIR_ENV_DIR:-}"
 fi
 
 # --- Keep tmp/ out of git, on every provision -----------------------------------------
@@ -119,11 +128,26 @@ if [ -n "${GLEIPNIR_CONTEXT:-}" ]; then
   /usr/local/sbin/gleipnir-context "$GLEIPNIR_CONTEXT"
 fi
 
-# --- npm packages, on first setup ---------------------------------------------
-if [ -f "$DEST/package.json" ] && [ ! -d "$DEST/node_modules" ]; then
-  if [ -f "$DEST/package-lock.json" ]; then install_cmd="npm ci"; else install_cmd="npm install"; fi
-  log "Installing npm packages ($install_cmd)"
-  sudo -u dev -H bash -c "cd '$DEST' && $install_cmd"
-fi
+# --- Each app's packages, on first setup --------------------------------------------
+# Installed as dev, like you'd do in the editor's terminal. After this, installing packages
+# is up to you or Claude.
+while IFS=$'\t' read -r name folder _; do
+  dir="$DEST/$folder"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+  label="$name"; [ "$folder" = "." ] && label="the project"
+  if [ -f "$dir/package.json" ] && [ ! -d "$dir/node_modules" ]; then
+    if [ -f "$dir/package-lock.json" ]; then install_cmd="npm ci"; else install_cmd="npm install"; fi
+    log "Installing npm packages for $label ($install_cmd)"
+    sudo -u dev -H bash -c 'cd "$1" && '"$install_cmd" _ "$dir"
+  fi
+  if [ -f "$dir/composer.json" ] && [ ! -d "$dir/vendor" ]; then
+    if command -v composer >/dev/null; then
+      log "Installing Composer packages for $label"
+      sudo -u dev -H bash -c 'cd "$1" && composer install --no-interaction --no-progress' _ "$dir"
+    else
+      warn "$label has a composer.json, but PHP isn't enabled (set php.enabled in the machine's config)"
+    fi
+  fi
+done < <(apps)
 
 log "Project ready in $DEST"

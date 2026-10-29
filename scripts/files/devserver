@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# Gleipnir: control the project's dev server.
-#   devserver [status|start|stop|restart|log [-f]]
+# Gleipnir: control the project's dev servers, one per app.
+#   devserver [status|start|stop|restart|log [-f]|list] [app]
 set -euo pipefail
 
-UNIT=gleipnir-dev.service
-LOG=/var/log/gleipnir/devserver.log
+LIST=/etc/gleipnir/devservers
+LOG_DIR=/var/log/gleipnir
 
 usage() {
   cat <<'EOF'
-Usage: devserver [command]
+Usage: devserver [command] [app]
 
-  status       Is it running? (the default)
-  start        Start it
-  stop         Stop it, until the next start or reboot
-  restart      Restart it, e.g. after changing .env or installing packages
-  log          Show the end of its output
-  log -f       Follow its output as it happens (Ctrl+C to stop)
+  status       Are they running? (the default)
+  start        Start them
+  stop         Stop them, until the next start or reboot
+  restart      Restart them, e.g. after changing .env or installing packages
+  log          Show the end of their output
+  log -f       Follow their output as it happens (Ctrl+C to stop)
+  list         Each app's folder, port and command
+
+Each command works on every app unless you name one, e.g. devserver restart backend.
 EOF
 }
+
+# The apps with a dev server: name, folder, port, command
+names() { cut -f1 "$LIST" 2>/dev/null; }
 
 # Run systemctl --user as dev: directly when we are dev, otherwise through sudo
 dev_systemctl() {
@@ -28,50 +34,79 @@ dev_systemctl() {
   elif sudo -n true 2>/dev/null; then
     sudo -u dev env XDG_RUNTIME_DIR="$runtime" systemctl --user "$@"
   else
-    echo "devserver: only dev (the editor's terminal) or the admin user can control the dev server." >&2
+    echo "devserver: only dev (the editor's terminal) or the admin user can control the dev servers." >&2
     exit 1
   fi
 }
 
-# Only for the commands that control it; help and log work regardless
-case "${1:-status}" in
-  status|start|stop|restart|try-restart)
-    if [ ! -f "/etc/systemd/user/$UNIT" ]; then
-      echo "devserver: the dev server isn't set up on this machine (see devserver.enabled in its config)." >&2
-      exit 1
-    fi
-    ;;
+command="${1:-status}"
+[ $# -gt 0 ] && shift
+follow=no
+if [ "$command" = log ] || [ "$command" = logs ]; then
+  if [ "${1:-}" = "-f" ]; then follow=yes; shift; fi
+fi
+app="${1:-}"
+
+case "$command" in
+  -h|--help|help) usage; exit 0 ;;
 esac
 
-case "${1:-status}" in
+if [ ! -s "$LIST" ]; then
+  echo "devserver: no dev servers are set up on this machine (see devserver in its config, and its apps)." >&2
+  exit 1
+fi
+
+# The apps to act on
+if [ -n "$app" ]; then
+  if ! names | grep -qxF "$app"; then
+    echo "devserver: no dev server called \"$app\". These are set up: $(names | paste -sd ' ')" >&2
+    exit 1
+  fi
+  targets=("$app")
+else
+  mapfile -t targets < <(names)
+fi
+units=()
+logs=()
+for name in "${targets[@]}"; do
+  units+=("gleipnir-dev@$name.service")
+  logs+=("$LOG_DIR/devserver-$name.log")
+done
+
+case "$command" in
   status)
-    dev_systemctl status --no-pager --lines=0 "$UNIT" || true
+    dev_systemctl status --no-pager --lines=0 "${units[@]}" || true
     ;;
   start|restart)
-    dev_systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
-    dev_systemctl "$1" "$UNIT"
-    echo "Dev server ${1}ed. Output: devserver log -f"
+    dev_systemctl reset-failed "${units[@]}" >/dev/null 2>&1 || true
+    dev_systemctl "$command" "${units[@]}"
+    echo "${command^}ed: ${targets[*]}. Output: devserver log -f${app:+ $app}"
     ;;
   stop)
-    dev_systemctl stop "$UNIT"
-    echo "Dev server stopped."
+    dev_systemctl stop "${units[@]}"
+    echo "Stopped: ${targets[*]}"
     ;;
   try-restart)
-    # Restart only if it's running. Used after the .env is updated.
-    if dev_systemctl is-active --quiet "$UNIT"; then
-      dev_systemctl restart "$UNIT"
-      echo "Dev server restarted."
-    fi
+    # Restart only those that are running. Used after the .env files are updated.
+    for unit in "${units[@]}"; do
+      if dev_systemctl is-active --quiet "$unit"; then
+        dev_systemctl restart "$unit"
+        echo "Dev server restarted: ${unit#gleipnir-dev@}" | sed 's/\.service$//'
+      fi
+    done
     ;;
   log|logs)
-    if [ "${2:-}" = "-f" ]; then
-      exec tail -n 50 -F "$LOG"
+    if [ "$follow" = yes ]; then
+      exec tail -n 50 -F "${logs[@]}"
     else
-      exec tail -n 50 "$LOG"
+      exec tail -n 50 "${logs[@]}"
     fi
     ;;
-  -h|--help|help)
-    usage
+  list)
+    printf '%-14s %-16s %-6s %s\n' APP FOLDER PORT COMMAND
+    while IFS=$'\t' read -r name folder port cmd; do
+      printf '%-14s %-16s %-6s %s\n' "$name" "$folder" "$port" "$cmd"
+    done < "$LIST"
     ;;
   *)
     usage >&2

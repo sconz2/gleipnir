@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Gleipnir: Claude Code, held in place by three parts of the binding:
 #   Týr       managed settings, owned by root, that Claude can't change
-#   Gjöll     a firewall and a proxy: Claude reaches only the sites on its list, by name
+#   Gjöll     a firewall and a proxy: Claude reaches only the sites on its list, by name,
+#             and only downloads from the package sites (npm, and Composer's)
 #   Heimdall  change checks after each turn and at the end of each session
 set -euo pipefail
 source "$GLEIPNIR_SRC/scripts/lib.sh"
@@ -9,12 +10,17 @@ export DEBIAN_FRONTEND=noninteractive
 
 FILES="$GLEIPNIR_SRC/scripts/files"
 SQUID_DIR=/etc/squid/gleipnir
+SSL_DB=/var/spool/squid/ssl_db
 CLAUDE_ENV=/etc/gleipnir/claude-env   # the proxy settings, read by the claude launcher
+PROXY_CA=/etc/gleipnir/proxy-ca.crt   # the proxy's certificate authority (public part)
+CA_BUNDLE=/etc/gleipnir/ca-bundle.pem # what claude's tools trust: the system's, plus that
+CA_HOOK=/etc/ca-certificates/update.d/gleipnir-ca-bundle
 RESOLVED_DROPIN=/etc/systemd/system/systemd-resolved.service.d/gleipnir.conf
 DBUS_POLICY=/etc/dbus-1/system.d/gleipnir-resolve1.conf
 
 NETWORK="$(cfg claude.network allowlist)"
 CHECKS="$(cfg claude.checks true)"
+PHP="$(cfg php.enabled false)"
 # claude.wip_branch was called claude.autocommit; the old name still works
 WIP_BRANCH="$(cfg claude.wip_branch "$(cfg claude.autocommit true)")"
 case "$NETWORK" in
@@ -46,9 +52,12 @@ git_email="$(cfg git.email '')"
 if [ -n "$git_name" ]; then sudo -u claude -H git config --global user.name "$git_name"; fi
 if [ -n "$git_email" ]; then sudo -u claude -H git config --global user.email "$git_email"; fi
 
-printf 'ignore-scripts=true\n' > /home/claude/.npmrc
-chown root:root /home/claude/.npmrc
-chmod 0644 /home/claude/.npmrc
+# Owned by root so claude can't change it. Written with install, which replaces anything
+# claude left in its place (such as a link to another file) rather than writing through it.
+npmrc="$(mktemp)"
+printf 'ignore-scripts=true\n' > "$npmrc"
+install -o root -g root -m 0644 "$npmrc" /home/claude/.npmrc
+rm -f "$npmrc"
 
 # --- Helpers ---------------------------------------------------------------------
 install -m 0755 "$FILES/claude-launcher" /usr/local/bin/claude
@@ -65,9 +74,129 @@ printf '%s\n' "$NETWORK" > /etc/gleipnir/claude-network
 if [ "$CHECKS" = "true" ]; then touch /etc/gleipnir/heimdall; else rm -f /etc/gleipnir/heimdall; fi
 if [ "$WIP_BRANCH" = "true" ]; then touch /etc/gleipnir/claude-autocommit; else rm -f /etc/gleipnir/claude-autocommit; fi
 
-# --- The proxy settings for claude's tools ----------------------------------------------
-# Both spellings, since tools disagree on which they read. NO_PROXY keeps localhost (the
-# dev server, the database) direct. NODE_USE_ENV_PROXY makes Node's built-in fetch use them.
+# --- Gjöll's proxy: Squid ------------------------------------------------------------
+# Every site is checked by name, twice. Most are never decrypted; the package sites are,
+# so only downloads get through. See scripts/files/squid.conf.
+apt-get install -y squid-openssl >/dev/null
+install -d -m 0755 "$SQUID_DIR"
+
+# The package sites: decrypted, downloads only. npm's always; Composer's with PHP
+# (Packagist's catalogue, and GitHub, where the packages themselves are downloaded from).
+packages=(registry.npmjs.org)
+if [ "$PHP" = "true" ]; then
+  packages+=(repo.packagist.org packagist.org api.github.com codeload.github.com)
+fi
+{
+  echo "# Managed by Gleipnir: the package sites, decrypted so only downloads get through"
+  printf '%s\n' "${packages[@]}"
+} > "$SQUID_DIR/package-domains"
+
+# The sites each user may reach. "example.com" is that name only; ".example.com" or
+# "*.example.com" is example.com and everything under it.
+python3 -I - "$SQUID_DIR/claude-domains" "$(cfg claude.allowed_domains '')" "${packages[@]}" <<'PY'
+import re, sys
+# What Claude Code needs (Anthropic's network requirements), and the package sites
+packages = sys.argv[3:]
+builtin = ["api.anthropic.com", "claude.ai", "platform.claude.com"] + packages
+extra = sys.argv[2].split("\n")
+# Names only: the last part must have a letter in it, so addresses like 1.2.3.4 don't count
+valid = re.compile(r"^\.?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?$")
+names = set()
+for raw in builtin + extra:
+    name = raw.strip().lower()
+    if not name:
+        continue
+    if name.startswith("*."):
+        name = name[1:]
+    if not valid.match(name):
+        sys.exit(f"claude.allowed_domains: \"{raw.strip()}\" isn't a site name (use e.g. docs.example.com or .example.com)")
+    names.add(name)
+    # A wildcard over a package site lets its neighbours through without the downloads-only
+    # check (".github.com" lets uploads.github.com through, for example). Allowed, but said.
+    if raw not in builtin and name.startswith("."):
+        covered_packages = [p for p in packages if p.endswith(name)]
+        if covered_packages:
+            print(f"    WARNING: claude.allowed_domains: {raw.strip()} also allows sites next to "
+                  f"{', '.join(covered_packages)}, which aren't limited to downloads", file=sys.stderr)
+# Squid refuses lists where one entry covers another, so keep only the widest
+wide = {n[1:] for n in names if n.startswith(".")}
+def covered(n):
+    bare = n.lstrip(".")
+    parts = bare.split(".")
+    parents = {".".join(parts[i:]) for i in range(1, len(parts))}
+    return (not n.startswith(".") and bare in wide) or bool(parents & wide)
+kept = sorted(n for n in names if not covered(n))
+with open(sys.argv[1], "w") as fh:
+    fh.write("# Managed by Gleipnir: set claude.allowed_domains in the machine's config\n")
+    fh.write("\n".join(kept) + "\n")
+PY
+# The dev servers' list: empty until they get their own user
+echo "# Managed by Gleipnir" > "$SQUID_DIR/runner-domains"
+chmod 0644 "$SQUID_DIR/claude-domains" "$SQUID_DIR/runner-domains" "$SQUID_DIR/package-domains"
+
+# The proxy's own certificate authority, made once per machine. Squid signs a certificate
+# with it for each package site it decrypts. Its private key is readable only by root and
+# Squid; only claude's tools trust it (through CA_BUNDLE below), never the system as a whole.
+rm -f "$SQUID_DIR/bump.pem"   # the previous throwaway certificate, replaced by this
+new_ca=no
+if [ ! -s "$SQUID_DIR/ca.pem" ] || [ ! -s "$PROXY_CA" ]; then
+  stage="$(mktemp -d)"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=Gleipnir package proxy ($(hostname))" \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout "$stage/key.pem" -out "$stage/cert.pem" >/dev/null 2>&1
+  (umask 077; cat "$stage/cert.pem" "$stage/key.pem" > "$SQUID_DIR/ca.pem")
+  install -m 0644 "$stage/cert.pem" "$PROXY_CA"
+  rm -rf "$stage"
+  new_ca=yes
+fi
+chown root:proxy "$SQUID_DIR/ca.pem"
+chmod 0640 "$SQUID_DIR/ca.pem"
+
+# Squid's helper that makes those certificates, and the folder it keeps them in. Emptied
+# whenever the authority is new, so no certificate signed by an old one is reused.
+certgen="$(dpkg -L squid-openssl 2>/dev/null | grep -E '/security_file_certgen$' | head -n 1 || true)"
+[ -x "$certgen" ] || fail "Squid's certificate helper (security_file_certgen) wasn't found in squid-openssl"
+if [ "$new_ca" = yes ] || [ ! -d "$SSL_DB" ]; then
+  install -d -o proxy -g proxy -m 0750 "$(dirname "$SSL_DB")"
+  rm -rf "$SSL_DB"
+  sudo -u proxy "$certgen" -c -s "$SSL_DB" -M 4MB >/dev/null
+fi
+
+# The bundle claude's tools trust, rebuilt whenever the system's certificates are updated
+install -d -m 0755 "$(dirname "$CA_HOOK")"
+cat > "$CA_HOOK" <<EOF
+#!/bin/sh
+# Managed by Gleipnir: the certificates claude's tools trust (the system's, plus the
+# proxy's own for the package sites). Run by update-ca-certificates.
+[ -f $PROXY_CA ] || exit 0
+cat /etc/ssl/certs/ca-certificates.crt $PROXY_CA > $CA_BUNDLE.new && chmod 0644 $CA_BUNDLE.new && mv $CA_BUNDLE.new $CA_BUNDLE
+EOF
+chmod 0755 "$CA_HOOK"
+"$CA_HOOK"
+
+# Ubuntu's own config, kept once for reference
+[ -f /etc/squid/squid.conf.ubuntu ] || cp /etc/squid/squid.conf /etc/squid/squid.conf.ubuntu
+sed "s#/usr/lib/squid/security_file_certgen#$certgen#" "$FILES/squid.conf" > /etc/squid/squid.conf.new
+chmod 0644 /etc/squid/squid.conf.new
+mv /etc/squid/squid.conf.new /etc/squid/squid.conf
+squid -k parse -f /etc/squid/squid.conf >/dev/null 2>&1 \
+  || { squid -k parse -f /etc/squid/squid.conf 2>&1 | grep -iE 'error|fatal' >&2; fail "Squid's config didn't parse"; }
+
+# After each start, nudge Squid to check its inner ports again (see gjoll-proxy-warmup)
+install -d -m 0755 /etc/systemd/system/squid.service.d
+cat > /etc/systemd/system/squid.service.d/gleipnir.conf <<'EOF'
+[Service]
+ExecStartPost=/usr/local/sbin/gjoll-proxy-warmup
+Restart=on-failure
+RestartSec=5
+EOF
+
+# --- The settings for claude's tools ----------------------------------------------------
+# The proxy, in both spellings, since tools disagree on which they read. NO_PROXY keeps
+# localhost (the dev server, the database) direct. NODE_USE_ENV_PROXY makes Node's built-in
+# fetch use them. The certificate settings make each kind of tool trust the proxy's
+# authority as well as the usual ones: OpenSSL, PHP and Composer (SSL_CERT_FILE), curl,
+# Python's requests, and Node and npm (NODE_EXTRA_CA_CERTS).
 if [ "$NETWORK" = "allowlist" ]; then
   proxy=http://127.0.0.1:3128
   {
@@ -78,6 +207,10 @@ if [ "$NETWORK" = "allowlist" ]; then
     echo "NO_PROXY=localhost,127.0.0.1,::1"
     echo "no_proxy=localhost,127.0.0.1,::1"
     echo "NODE_USE_ENV_PROXY=1"
+    echo "SSL_CERT_FILE=$CA_BUNDLE"
+    echo "CURL_CA_BUNDLE=$CA_BUNDLE"
+    echo "REQUESTS_CA_BUNDLE=$CA_BUNDLE"
+    echo "NODE_EXTRA_CA_CERTS=$PROXY_CA"
   } > "$CLAUDE_ENV"
   chmod 0644 "$CLAUDE_ENV"
 else
@@ -99,6 +232,9 @@ env = {
     "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1",
     # Your claude.ai connectors (Drive, Gmail and so on) stay out of the sandbox
     "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    # Updates come through apt; and no plugin marketplace is fetched (see below)
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 }
 if os.path.exists(sys.argv[2]):
     with open(sys.argv[2]) as fh:
@@ -115,6 +251,10 @@ settings = {
     "attribution": {"commit": "", "pr": "", "sessionUrl": False},
     "includeCoAuthoredBy": False,
     "disableClaudeAiConnectors": True,
+    # No plugins: they're code from GitHub or your claude.ai account, outside the sandbox.
+    # Skills in ~/.claude/skills (like /project-init) aren't plugins and still work.
+    "strictKnownMarketplaces": [],
+    "syncClaudeAiPlugins": False,
     "permissions": {"deny": [f"{verb}(**/{name})" for verb in ("Read", "Edit") for name in env_files]},
 }
 
@@ -132,72 +272,6 @@ print()
 PY
 chmod 0644 /etc/claude-code/managed-settings.json
 # Claude's instructions, /etc/claude-code/CLAUDE.md, are written by 10-claude-md.sh
-
-# --- Gjöll's proxy: Squid ------------------------------------------------------------
-# Every site is checked by name, twice, and nothing is decrypted. See scripts/files/squid.conf.
-apt-get install -y squid-openssl >/dev/null
-install -d -m 0755 "$SQUID_DIR"
-
-# The sites each user may reach. "example.com" is that name only; ".example.com" or
-# "*.example.com" is example.com and everything under it.
-python3 -I - "$SQUID_DIR/claude-domains" "$(cfg claude.allowed_domains '')" <<'PY'
-import re, sys
-# What Claude Code needs (Anthropic's network requirements), and npm
-builtin = ["api.anthropic.com", "claude.ai", "platform.claude.com", "registry.npmjs.org"]
-extra = sys.argv[2].split("\n")
-valid = re.compile(r"^\.?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-names = set()
-for raw in builtin + extra:
-    name = raw.strip().lower()
-    if not name:
-        continue
-    if name.startswith("*."):
-        name = name[1:]
-    if not valid.match(name):
-        sys.exit(f"claude.allowed_domains: \"{raw.strip()}\" isn't a site name (use e.g. docs.example.com or .example.com)")
-    names.add(name)
-# Squid refuses lists where one entry covers another, so keep only the widest
-wide = {n[1:] for n in names if n.startswith(".")}
-def covered(n):
-    bare = n.lstrip(".")
-    parts = bare.split(".")
-    parents = {".".join(parts[i:]) for i in range(1, len(parts))}
-    return (not n.startswith(".") and bare in wide) or bool(parents & wide)
-kept = sorted(n for n in names if not covered(n))
-with open(sys.argv[1], "w") as fh:
-    fh.write("# Managed by Gleipnir: set claude.allowed_domains in the machine's config\n")
-    fh.write("\n".join(kept) + "\n")
-PY
-# The dev servers' list: empty until they get their own user
-echo "# Managed by Gleipnir" > "$SQUID_DIR/runner-domains"
-chmod 0644 "$SQUID_DIR/claude-domains" "$SQUID_DIR/runner-domains"
-
-# A throwaway certificate for the ports that read the hello. Nothing trusts it and
-# nothing is signed with it: those ports only read, pass through or cut.
-if [ ! -s "$SQUID_DIR/bump.pem" ]; then
-  stage="$(mktemp -d)"
-  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=Gleipnir proxy (not trusted)" \
-    -keyout "$stage/key.pem" -out "$stage/cert.pem" >/dev/null 2>&1
-  cat "$stage/cert.pem" "$stage/key.pem" > "$SQUID_DIR/bump.pem"
-  rm -rf "$stage"
-fi
-chown root:proxy "$SQUID_DIR/bump.pem"
-chmod 0640 "$SQUID_DIR/bump.pem"
-
-# Ubuntu's own config, kept once for reference
-[ -f /etc/squid/squid.conf.ubuntu ] || cp /etc/squid/squid.conf /etc/squid/squid.conf.ubuntu
-install -m 0644 "$FILES/squid.conf" /etc/squid/squid.conf
-squid -k parse -f /etc/squid/squid.conf >/dev/null 2>&1 \
-  || { squid -k parse -f /etc/squid/squid.conf 2>&1 | grep -iE 'error|fatal' >&2; fail "Squid's config didn't parse"; }
-
-# After each start, nudge Squid to check its inner ports again (see gjoll-proxy-warmup)
-install -d -m 0755 /etc/systemd/system/squid.service.d
-cat > /etc/systemd/system/squid.service.d/gleipnir.conf <<'EOF'
-[Service]
-ExecStartPost=/usr/local/sbin/gjoll-proxy-warmup
-Restart=on-failure
-RestartSec=5
-EOF
 
 # --- No name lookups for claude through systemd-resolved ---------------------------------
 # Gjöll blocks DNS on the network, but resolved also answers over D-Bus and a socket in

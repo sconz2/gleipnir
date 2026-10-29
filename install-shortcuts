@@ -79,8 +79,8 @@ function _gleipnir_need { [ -n "${2:-}" ] || { echo "usage: $1 <machine>" >&2; r
 # Start or fully provision a machine, saving the output to logs/ in the Gleipnir folder
 function gup   { _gleipnir_need gup "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant up "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
 function gprov { _gleipnir_need gprov "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant provision "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
-# Copy just the .env (and restart the dev server), or just the context folder
-function genv  { _gleipnir_need genv "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with env-upload,env ); }
+# Copy just the .env files (and restart the dev servers), or just the context folder
+function genv  { _gleipnir_need genv "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with env-upload,env-upload-apps,env ); }
 function gctx  { _gleipnir_need gctx "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant provision "$1" --provision-with context-upload,context ); }
 # Log in to a machine, or shut it down
 function gssh  { _gleipnir_need gssh "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant ssh "$1" ); }

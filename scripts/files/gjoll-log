@@ -5,9 +5,10 @@
   sudo gjoll-log --since 2h        or 30m, 3d, or a Unix time (@1793223414)
   sudo gjoll-log --user claude     one user only
 
-Three kinds of block:
+Four kinds of block:
   refused by the proxy     the site isn't on that user's list
-  wrong name in the hello  the tool asked for an allowed site, then named another
+  wrong name in the hello  the tool asked for one site, then named another
+  upload to a package site only downloads are allowed from npm, Packagist and GitHub
   direct connection        something tried to go round the proxy (or used DNS)
 """
 import argparse
@@ -20,6 +21,9 @@ from collections import Counter
 
 SQUID_LOG = "/var/log/squid/access.log"
 LISTS = {"claude": "/etc/squid/gleipnir/claude-domains", "runner": "/etc/squid/gleipnir/runner-domains"}
+PACKAGE_LIST = "/etc/squid/gleipnir/package-domains"
+# When gjoll-firewall --verify tested that claude can't look names up: its own lookups
+CHECK_TIMES = "/var/lib/gleipnir/dns-check-times"
 OUTER = {"3128": "claude", "3129": "runner"}
 INNER = {"3138": "claude", "3139": "runner"}
 KERNEL_LINE = re.compile(r"gjoll (\S+) blocked: ")
@@ -32,7 +36,10 @@ def field(line, name):
 
 def parse_since(text):
     if text.startswith("@"):
-        return float(text[1:])
+        try:
+            return float(text[1:])
+        except ValueError:
+            sys.exit(f"gjoll-log: --since takes 30m, 2h, 3d or @<unix time>, not {text!r}")
     match = re.fullmatch(r"(\d+)([mhd])", text)
     if not match:
         sys.exit(f"gjoll-log: --since takes 30m, 2h, 3d or @<unix time>, not {text!r}")
@@ -62,8 +69,19 @@ def allowed(name, rules):
     return name in exact or any(name == s or name.endswith("." + s) for s in suffixes)
 
 
-def squid_blocks(path, since, lists):
-    refused, wrong_hello = Counter(), Counter()
+def host_of(url):
+    """The site in a log line's address: "example.com:443" or "https://example.com/path"."""
+    url = re.sub(r"^[a-z]+://", "", url)
+    return url.split("/", 1)[0].rsplit(":", 1)[0].lower()
+
+
+def short(url, width=90):
+    url = re.sub(r"^https://", "", url)
+    return url if len(url) <= width else url[:width - 3] + "..."
+
+
+def squid_blocks(path, since, lists, packages):
+    refused, wrong_hello, uploads = Counter(), Counter(), Counter()
     for log in (path + ".1", path):
         try:
             fh = open(log, errors="replace")
@@ -71,9 +89,12 @@ def squid_blocks(path, since, lists):
             continue
         with fh:
             for line in fh:
-                # time, port, asked for, hello name, status, result
+                # time, port, method, address asked for, hello name, status, result
+                # (lines from before the method was logged have no method)
                 parts = line.split()
-                if len(parts) < 6:
+                if len(parts) == 6:
+                    parts.insert(2, "CONNECT")
+                if len(parts) < 7:
                     continue
                 try:
                     when = float(parts[0])
@@ -81,15 +102,31 @@ def squid_blocks(path, since, lists):
                     continue
                 if when < since:
                     continue
-                port, asked, hello, result = parts[1], parts[2], parts[3], parts[5]
+                port, method, asked, hello, status, result = parts[1:7]
                 if port in OUTER and result == "TCP_DENIED":
                     refused[(OUTER[port], asked)] += 1
-                elif port in INNER and hello != "-":
-                    user = INNER[port]
-                    if not allowed(hello, lists[user]):
-                        host = asked.rsplit(":", 1)[0]
+                elif port in INNER and result == "TCP_DENIED":
+                    # Inside a decrypted package site: an upload, or a CONNECT sent inside it
+                    uploads[(INNER[port], f"{method} {short(asked)}")] += 1
+                elif port in INNER and method == "CONNECT" and hello != "-":
+                    user, host = INNER[port], host_of(asked)
+                    # Cut: a name not on the list, or a package site by one name and not the other
+                    if not allowed(hello, lists[user]) or allowed(hello, packages) != allowed(host, packages):
                         wrong_hello[(user, f"{hello} (asked for {host})")] += 1
-    return refused, wrong_hello
+                elif port in INNER and method != "CONNECT" and status == "503" and hello != "-" \
+                        and host_of(asked) != hello:
+                    # Inside a decrypted package site: a request naming another site, which Squid
+                    # refuses with a 503 (a 503 for the site itself means it was down)
+                    uploads[(INNER[port], f"{method} {short(asked)}")] += 1
+    return refused, wrong_hello, uploads
+
+
+def check_times():
+    try:
+        with open(CHECK_TIMES) as fh:
+            return [float(line) for line in fh if line.strip()]
+    except (OSError, ValueError):
+        return []
 
 
 def kernel_lines(since, path):
@@ -101,7 +138,8 @@ def kernel_lines(since, path):
             return []
     try:
         out = subprocess.run(
-            ["journalctl", "-k", "--no-pager", "-o", "cat", "--since", f"@{int(since)}", "--grep", "gjoll .* blocked"],
+            ["journalctl", "-k", "--no-pager", "-o", "short-unix", "--since", f"@{int(since)}",
+             "--grep", "gjoll .* blocked"],
             capture_output=True, text=True, timeout=30)
         return out.stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
@@ -110,6 +148,7 @@ def kernel_lines(since, path):
 
 def kernel_blocks(since, path):
     direct = Counter()
+    checks = check_times()
     for line in kernel_lines(since, path):
         match = KERNEL_LINE.search(line)
         if not match:
@@ -117,11 +156,23 @@ def kernel_blocks(since, path):
         user = match.group(1)
         dst, proto, dport = field(line, "DST"), field(line, "PROTO"), field(line, "DPT")
         if dport == "53":
+            # Gleipnir's own test that claude can't look names up isn't worth reporting
+            try:
+                when = float(line.split()[0])
+            except (IndexError, ValueError):
+                when = None
+            if user == "claude" and when is not None and any(t - 1 <= when <= t + 15 for t in checks):
+                continue
             what = f"DNS lookup via {dst}"
         else:
             what = f"{dst}:{dport or '?'}" + (f" ({proto})" if proto and proto != "TCP" else "")
         direct[(user, what)] += 1
     return direct
+
+
+def printable(text):
+    """Names come from the tools Claude runs; nothing in them may act on your terminal."""
+    return "".join(c if c.isprintable() else "?" for c in text)
 
 
 def section(title, counts, user, limit):
@@ -134,7 +185,7 @@ def section(title, counts, user, limit):
         items = sorted(by_user[who], key=lambda row: (-row[1], row[0]))
         out.append(f"  {who}: {title}")
         for what, n in items[:limit]:
-            out.append(f"    {n:>5}x  {what}")
+            out.append(f"    {n:>5}x  {printable(what)}")
         if len(items) > limit:
             out.append(f"           ...and {len(items) - limit} more (sudo gjoll-log)")
     return out
@@ -154,20 +205,22 @@ def main():
 
     since = parse_since(args.since)
     lists = {user: load_list(path) for user, path in LISTS.items()}
-    refused, wrong_hello = squid_blocks(args.squid_log, since, lists)
+    refused, wrong_hello, uploads = squid_blocks(args.squid_log, since, lists, load_list(PACKAGE_LIST))
     direct = kernel_blocks(since, args.kernel_log)
     limit = 10 if args.brief else 1000
 
     lines = []
     lines += section("refused by the proxy (not on its list)", refused, args.user, limit)
     lines += section("cut: the hello named a different site", wrong_hello, args.user, limit)
+    lines += section("refused inside a package site (only downloads are allowed)", uploads, args.user, limit)
     lines += section("blocked going round the proxy", direct, args.user, limit)
 
     started = time.strftime("%Y-%m-%d %H:%M", time.localtime(since))
     if lines:
         print(f"Gjöll: blocked since {started}")
         print("\n".join(lines))
-        print("To allow a site, add it to claude.allowed_domains and provision. Names you don't recognise are worth a look.")
+        print("To allow a site, add it to claude.allowed_domains and provision. Names you don't recognise, "
+              "and any upload to a package site, are worth a look.")
     else:
         print(f"Gjöll: nothing blocked since {started}")
 

@@ -7,9 +7,13 @@
     {{if wip_branch}} / {{if not wip_branch}}           claude.wip_branch is on / off
     {{if network=allowlist}} / {{if network=open}}      claude.network
     {{if playwright}}                                   playwright.enabled is on
-    {{if devserver}}                                    the dev server is set up
+    {{if php}}                                          php.enabled is on
+    {{if apps}}                                         the config lists "apps" (a monorepo)
+    {{if devserver}}                                    at least one dev server is set up
     {{if context}}                                      a context folder is copied into the project
-  {{devserver_command}} becomes the dev server's command.
+  A line that's just {{apps}} becomes the list of apps (folder and port), and one that's
+  just {{devservers}} the list of dev servers (command and port).
+  {{php_version}} becomes the PHP version.
   This comment isn't included.
 -->
 # Gleipnir environment
@@ -20,10 +24,14 @@ You're running inside a Gleipnir VM, as the `claude` user.
 - The editor on port 8080 belongs to the user, and you can't connect to it.
 {{if network=allowlist}}
 - Your network access is limited to an allowlist. Everything goes through a proxy that checks each site by name, and you can't look names up (no DNS). If you need a site that isn't reachable, say so rather than working around it.
-- Tools reach the proxy through `HTTPS_PROXY`, which is already set; don't change or unset it. Errors like "could not resolve host" or `ENOTFOUND` usually mean the tool isn't using the proxy, not that the site is down: look for the tool's own proxy setting, or tell the user. A 403 from the proxy (in Node's `fetch`: "Request was cancelled") means the site isn't on the list.
+- Tools reach the proxy through `HTTPS_PROXY`, which is already set; don't change or unset it, or the certificate settings next to it. Errors like "could not resolve host" or `ENOTFOUND` usually mean the tool isn't using the proxy, not that the site is down: look for the tool's own proxy setting, or tell the user. A 403 from the proxy (in Node's `fetch`: "Request was cancelled") means the site isn't on the list.
+- The package sites (npm's registry, and Composer's when PHP is set up) only allow downloads: installing packages works, but nothing can be published or uploaded. A certificate error from a package site means the tool isn't using the machine's certificate settings (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`); tell the user rather than turning certificate checks off.
 {{end}}
 {{if network=open}}
 - Your network connections are logged.
+{{end}}
+{{if php}}
+- PHP {{php_version}} and Composer are installed. Run Composer yourself (`composer require`, `composer install`); packages come from Packagist and GitHub, download only.
 {{end}}
 {{if context}}
 - `tmp/context/` in the project holds background files from the user (briefs, requirements, notes). It's read-only for you and replaced from the user's computer on each provision, so don't try to change it.
@@ -31,13 +39,27 @@ You're running inside a Gleipnir VM, as the `claude` user.
 {{if playwright}}
 - Playwright's browsers are installed in /opt/playwright. Don't run `playwright install`; if a browser is missing, say so.
 {{end}}
+{{if apps}}
+
+## Apps
+
+The project is a monorepo. Each app has its own folder, `.env`, packages and dev server:
+
+{{apps}}
+
+- Run each app's commands (npm, Composer, artisan, tests) in its own folder.
+- Each app's `.env` is copied in from the user's computer. If an app's folder doesn't exist yet, it hasn't been created: /project-init sets it up.
+- An app's port is the same inside this machine and on the user's computer, so `http://localhost:<port>` reaches it from either, e.g. the frontend calling the backend's API.
+{{end}}
 {{if devserver}}
 
-## Dev server
+## Dev servers
 
-- It runs `{{devserver_command}}` as the `dev` user, on port 5173, and reloads as you edit.
-- It belongs to the user: don't start, stop or restart it. If it needs restarting (after a dependency or config change), ask the user to run `devserver restart`.
-- Its output is in /var/log/gleipnir/devserver.log (`devserver log` shows the end of it). Read it to check for build errors.
+{{devservers}}
+
+- They run as the `dev` user and reload as you edit.
+- They belong to the user: don't start, stop or restart them. If one needs restarting (after a dependency or config change), ask the user to run `devserver restart` (or `devserver restart <app>` for one).
+- Their output is in /var/log/gleipnir/ (`devserver log` shows the end of it, `devserver log <app>` one app's). Read it to check for errors.
 {{end}}
 {{if wip_branch}}
 
