@@ -270,6 +270,8 @@ Keep `main` checked out: a branch you have checked out can't be updated with Cla
 
 A branch in your copy is only ever moved forward. If you commit on a `wip/` branch yourself and Claude's version of it no longer contains your commits, yours is left alone and Claude's arrives beside it as `incoming/wip/<date>`. The `incoming/` branches are Claude's mirror, replaced whenever its branch changes, so don't commit on those. No branch name in your copy says who made it, and a `--squash` merge with your own message records none; a plain `git merge` would put the branch name in the merge message, so give it a message of your own (`-m`), and never push the `wip/` or `incoming/` branches themselves.
 
+Claude's branch is refused if it wouldn't leave room on the disk: more than a third of the free space packed, or more than half of it unpacked (a file of repeated bytes packs small and unpacks large). Ask Claude to take the big files out and commit. Git can't have a branch called `a` beside one called `a/b`, so a name of yours can be in the way of Claude's; it says which, and nothing changes until one is renamed.
+
 ### Claude's instructions
 
 `claude-instructions.md`, in the Gleipnir folder, is what Claude is told at the start of every session: how the machine works, its apps and dev servers, and the git rules above. Edit it there, then run `vagrant provision my-project`; every machine gets your version on its next provision, as a root-owned `/etc/claude-code/CLAUDE.md` that Claude can't change.

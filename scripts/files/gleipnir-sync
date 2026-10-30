@@ -11,22 +11,29 @@
 #
 # Only data moves between the two copies: dev writes a git bundle of your branches, and
 # claude reads it. Nothing of Claude's runs as dev, and Claude never touches your copy.
+# Claude's copy is Claude's to break; whatever state trusted/ is in, this puts it right.
 set -euo pipefail
 
 TRUSTED=/srv/project
 WORK=/srv/work
 CONFIG=/etc/gleipnir/config.json
+TRUSTED_REFS="$WORK/.git/refs/remotes/trusted"
 
 [ -d "$TRUSTED/.git" ] || { echo "Gleipnir: your copy of the project isn't set up yet; provision first." >&2; exit 1; }
 [ -d "$WORK/.git" ] || { echo "Gleipnir: Claude's copy of the project isn't set up yet; provision first." >&2; exit 1; }
 
 as_dev() { sudo -u dev -H git -C "$TRUSTED" "$@"; }
-as_claude() { sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
-
-# A new, empty repo has no branches to copy yet
-if [ -z "$(as_dev for-each-ref --count=1 --format='%(refname)' refs/heads/)" ]; then
-  exit 0
-fi
+# Claude's own hooks and git settings aren't needed for this, so they're switched off. Those
+# in its .git/config (filters, say) can't all be, so each command gets a time limit: a
+# setting that would hang only hangs itself.
+as_claude() {
+  local rc=0
+  timeout -k 5 600 sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "Gleipnir: git in Claude's copy didn't finish within 600s (git $1); something in Claude's git settings may be hanging it." >&2
+  fi
+  return "$rc"
+}
 
 # --- Which branches ----------------------------------------------------------------------------
 mapfile -t listed < <(python3 -I - "$CONFIG" <<'PY'
@@ -42,7 +49,9 @@ for name in branches if isinstance(branches, list) else []:
 PY
 )
 wanted=()
-if printf '%s\n' "${listed[@]}" | grep -qx '\*'; then
+if [ -z "$(as_dev for-each-ref --count=1 --format='%(refname)' refs/heads/)" ]; then
+  :   # a new, empty repo has no branches to copy yet
+elif printf '%s\n' "${listed[@]}" | grep -qx '\*'; then
   mapfile -t wanted < <(as_dev for-each-ref --format='%(refname:short)' refs/heads/)
 else
   current="$(as_dev symbolic-ref --short -q HEAD || true)"
@@ -60,27 +69,85 @@ else
     printf '%s\n' "${wanted[@]}" | grep -qxF -- "$name" || wanted+=("$name")
   done
 fi
+is_wanted() { printf '%s\n' "${wanted[@]}" | grep -qxF -- "$1"; }
+
+# --- Clear the way ----------------------------------------------------------------------------
+# Done first, and whether or not there's anything to copy. Branches no longer synced go from
+# trusted/ (what Claude already fetched can't be taken back), and so does anything else
+# under it: a name in the way of one being synced (trusted/main/x beside trusted/main) or a
+# broken reference, either of which would stop every sync from then on.
+mapfile -t valid < <(as_claude for-each-ref --format='%(refname)' refs/remotes/trusted/ | sed 's#^refs/remotes/trusted/##')
+for have in "${valid[@]}"; do
+  [ -n "$have" ] || continue
+  is_wanted "$have" || as_claude update-ref -d "refs/remotes/trusted/$have"
+done
+if sudo -u claude test -d "$TRUSTED_REFS"; then
+  while IFS= read -r -d '' path; do
+    rel="${path#"$TRUSTED_REFS/"}"
+    if ! is_wanted "$rel" || ! printf '%s\n' "${valid[@]}" | grep -qxF -- "$rel"; then
+      sudo -u claude rm -rf -- "$path"
+    fi
+  done < <(sudo -u claude find "$TRUSTED_REFS" -mindepth 1 ! -type d -print0)
+  sudo -u claude find "$TRUSTED_REFS" -mindepth 1 -depth -type d -empty -delete
+fi
 [ "${#wanted[@]}" -gt 0 ] || exit 0
 
 # --- Copy them ---------------------------------------------------------------------------------
-# The bundle is written by root, from git's output, into root's own folder: neither user
-# can swap it for something else on the way
-stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
-chmod 0755 "$stage"
-refs=()
-specs=()
+# Only what Claude's copy doesn't have yet. A branch whose tip is already there just gets
+# pointed at; the rest are bundled without what Claude's trusted/ tips already reach. (Claude's
+# copy gains nothing by lying about those: a bundle it then can't unpack is sent again whole.)
+declare -A tip=()
 for name in "${wanted[@]}"; do
-  refs+=("refs/heads/$name")
-  specs+=("+refs/heads/$name:refs/remotes/trusted/$name")
+  tip[$name]="$(as_dev rev-parse --verify "refs/heads/$name^{commit}")"
 done
-# shellcheck disable=SC2024  # root writing the file is the point
-as_dev bundle create --quiet - "${refs[@]}" > "$stage/trusted.bundle"
-chmod 0644 "$stage/trusted.bundle"
-as_claude fetch --quiet --no-tags "$stage/trusted.bundle" "${specs[@]}"
+declare -A arrived=()
+while IFS= read -r line; do
+  case "$line" in
+    *" commit "*) arrived[${line%% *}]=1 ;;
+  esac
+done < <(printf '%s\n' "${tip[@]}" | as_claude cat-file --batch-check 2>/dev/null || true)
+refs=()
+for name in "${wanted[@]}"; do
+  [ -n "${arrived[${tip[$name]}]:-}" ] || refs+=("refs/heads/$name")
+done
 
-# Branches no longer synced go from trusted/ (what Claude already fetched can't be taken back)
-while IFS= read -r have; do
-  [ -n "$have" ] || continue
-  printf '%s\n' "${wanted[@]}" | grep -qxF -- "$have" || as_claude update-ref -d "refs/remotes/trusted/$have"
-done < <(as_claude for-each-ref --format='%(refname)' refs/remotes/trusted/ | sed 's#^refs/remotes/trusted/##')
+if [ "${#refs[@]}" -gt 0 ]; then
+  # The bundle is written by root, from git's output, into root's own folder: neither user
+  # can swap it for something else on the way
+  stage="$(mktemp -d)"
+  trap 'rm -rf "$stage"' EXIT
+  chmod 0755 "$stage"
+  basis=()
+  while IFS= read -r line; do
+    case "$line" in *" commit "*) basis+=("^${line%% *}") ;; esac
+  done < <(as_claude for-each-ref --format='%(objectname)' refs/remotes/trusted/ | grep -Ex '[0-9a-f]{40,64}' \
+           | as_dev cat-file --batch-check 2>/dev/null || true)
+  unpacked=""
+  if [ "${#basis[@]}" -gt 0 ]; then
+    # shellcheck disable=SC2024  # root writing the file is the point
+    if as_dev bundle create --quiet - "${refs[@]}" "${basis[@]}" > "$stage/trusted.bundle" 2>/dev/null; then
+      chmod 0644 "$stage/trusted.bundle"
+      unpacked="$(as_claude bundle unbundle "$stage/trusted.bundle" 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "$unpacked" ]; then
+    # shellcheck disable=SC2024  # root writing the file is the point
+    as_dev bundle create --quiet - "${refs[@]}" > "$stage/trusted.bundle"
+    chmod 0644 "$stage/trusted.bundle"
+    unpacked="$(as_claude bundle unbundle "$stage/trusted.bundle")"
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sha="${line%% *}"; ref="${line#* }"
+    [ "$ref" != "$line" ] && [[ "$ref" == refs/heads/* ]] && arrived[$sha]=1
+  done <<< "$unpacked"
+fi
+
+for name in "${wanted[@]}"; do
+  if [ -z "${arrived[${tip[$name]}]:-}" ]; then
+    echo "Gleipnir: $name didn't arrive in Claude's copy; trusted/$name wasn't updated" >&2
+    continue
+  fi
+  as_claude update-ref "refs/remotes/trusted/$name" "${tip[$name]}" \
+    || echo "Gleipnir: trusted/$name in Claude's copy couldn't be updated" >&2
+done

@@ -20,6 +20,10 @@ set -euo pipefail
 
 TRUSTED=/srv/project
 WORK=/srv/work
+LOCK=/run/lock/gleipnir-review
+# Claude's branch lands here first; it's only made a branch of yours once it's all arrived and
+# nothing of yours would be lost
+INCOMING=refs/gleipnir/incoming
 
 [ "$(id -u)" -eq 0 ] || { echo "gleipnir-review: run it with sudo" >&2; exit 1; }
 if [ ! -d "$TRUSTED/.git" ] || [ ! -d "$WORK/.git" ]; then
@@ -27,9 +31,26 @@ if [ ! -d "$TRUSTED/.git" ] || [ ! -d "$WORK/.git" ]; then
   exit 1
 fi
 
-# Claude's own hooks and git settings aren't needed for this, so they're switched off
-as_claude() { sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
+# Claude's own hooks and git settings aren't needed for this, so they're switched off. Those
+# in its .git/config (filters, say) can't all be, so each command gets a time limit: a
+# setting that would hang only hangs itself. Set CLAUDE_GIT_SECONDS for the slow ones.
+as_claude() {
+  local limit="${CLAUDE_GIT_SECONDS:-60}" rc=0
+  timeout -k 5 "$limit" sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "Gleipnir: git in Claude's copy didn't finish within ${limit}s (git $1); something in Claude's git settings may be hanging it." >&2
+  fi
+  return "$rc"
+}
 as_dev() { sudo -u dev -H git -C "$TRUSTED" "$@"; }
+
+# One at a time: the claude command runs this as a session ends, and you may run greview
+[ -d "$(dirname "$LOCK")" ] || mkdir -p "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+if ! flock -w 120 9; then
+  echo "Gleipnir: another gleipnir-review is still running; try again in a moment." >&2
+  exit 1
+fi
 
 branch="${1:-}"
 if [ -z "$branch" ]; then
@@ -55,63 +76,137 @@ note_uncommitted() {
   fi
 }
 
-if ! as_claude rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+tip="$(as_claude rev-parse --verify --quiet "refs/heads/$branch^{commit}" || true)"
+if [ -z "$tip" ]; then
   echo "Gleipnir: $branch has no commits in Claude's copy yet; nothing to bring across."
   note_uncommitted
   exit 0
 fi
-if [ "$(as_dev symbolic-ref --short -q HEAD || true)" = "$dest" ]; then
+checked_out() { [ "$(as_dev symbolic-ref --short -q HEAD || true)" = "$1" ]; }
+if checked_out "$dest"; then
   echo "Gleipnir: your copy has $dest checked out, so it can't be updated. Switch to main first: git switch main" >&2
   exit 1
 fi
 
 # The bundle is written by root, from git's output, into root's own folder: Claude can't swap
-# it for something else before dev reads it
+# it for something else before dev reads it. Whatever happens, the holding reference goes.
 stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
+cleanup() {
+  rm -rf "$stage"
+  as_dev update-ref -d "$INCOMING" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 chmod 0755 "$stage"
-as_claude bundle create --quiet - "refs/heads/$branch" > "$stage/work.bundle"
-chmod 0644 "$stage/work.bundle"
-# Room for it: a branch full of huge files could fill the disk your copy is on
-size="$(stat -c %s "$stage/work.bundle")"
-free="$(df --output=avail -B1 "$TRUSTED" | tail -n 1)"
-if [ "$((size * 3))" -gt "$free" ]; then
-  echo "Gleipnir: Claude's branch is $((size / 1048576)) MB packed, and your copy's disk has only $((free / 1048576)) MB free; nothing was changed." >&2
-  echo "  Ask Claude what it added, and to take the big files out of the branch (git rm, then commit)." >&2
-  exit 1
+
+if as_dev cat-file -e "$tip^{commit}" 2>/dev/null; then
+  # Your copy already has every commit of it (brought across before, or made by you)
+  new="$tip"
+else
+  # Room for it, settled before anything is written: the bundle is cut off at a third of the
+  # free disk space, so a branch full of huge files can't fill the disk your copy is on
+  free="$(df --output=avail -B1 "$TRUSTED" | tail -n 1)"
+  stage_free="$(df --output=avail -B1 "$stage" | tail -n 1)"
+  [ "$stage_free" -lt "$free" ] && free="$stage_free"
+  limit=$((free / 3))
+
+  # Only what your copy doesn't have yet: your branch tips that Claude's copy also has are
+  # left out of the bundle. (Claude's copy gains nothing by claiming to have one: a bundle
+  # that then lacks objects is refused on arrival.)
+  basis=()
+  while IFS= read -r line; do
+    case "$line" in *" commit "*) basis+=("^${line%% *}") ;; esac
+  done < <(as_dev for-each-ref --format='%(objectname)' refs/heads/ | as_claude cat-file --batch-check 2>/dev/null || true)
+
+  set +e
+  CLAUDE_GIT_SECONDS=600 as_claude bundle create --quiet - "refs/heads/$branch" "${basis[@]}" 2>"$stage/bundle.err" \
+    | head -c $((limit + 1)) > "$stage/work.bundle"
+  bundled=${PIPESTATUS[0]}
+  set -e
+  chmod 0644 "$stage/work.bundle"
+  size="$(stat -c %s "$stage/work.bundle")"
+  if [ "$size" -gt "$limit" ]; then
+    echo "Gleipnir: Claude's branch is more than $((limit / 1048576)) MB packed, and your copy's disk has only $((free / 1048576)) MB free; nothing was changed." >&2
+    echo "  Ask Claude what it added, and to take the big files out of the branch (git rm, then commit)." >&2
+    exit 1
+  fi
+  if [ "$bundled" -ne 0 ]; then
+    tail -n 5 "$stage/bundle.err" >&2
+    echo "Gleipnir: Claude's branch couldn't be bundled; nothing was changed." >&2
+    exit 1
+  fi
+  if [ "$size" -gt $((500 * 1048576)) ]; then
+    echo "Gleipnir: Claude's branch is big ($((size / 1048576)) MB packed); look for large files it added."
+  fi
+
+  as_dev -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
+    fetch --quiet --no-tags --no-write-fetch-head "$stage/work.bundle" "+refs/heads/$branch:$INCOMING" \
+    || { echo "Gleipnir: Claude's branch didn't arrive in one piece; nothing was changed." >&2; exit 1; }
+  new="$(as_dev rev-parse --verify --quiet "$INCOMING^{commit}" || true)"
+  if [ -z "$new" ]; then
+    echo "Gleipnir: Claude's branch didn't arrive in one piece; nothing was changed." >&2
+    exit 1
+  fi
+
+  # Packed, a branch can be small and still unpack to a full disk when you look at it: a file
+  # of repeated bytes, say. Measure what arrived unpacked, before it becomes a branch of yours.
+  unpacked="$(as_dev rev-list --objects "$INCOMING" --not --branches --tags --remotes \
+    | cut -d' ' -f1 | as_dev cat-file --batch-check='%(objectsize)' | awk '{ s += $1 } END { print s + 0 }')"
+  if [ $((unpacked * 2)) -gt "$free" ]; then
+    echo "Gleipnir: Claude's branch adds $((unpacked / 1048576)) MB of files unpacked ($((size / 1048576)) MB packed), and your copy's disk has only $((free / 1048576)) MB free; nothing was changed." >&2
+    echo "  Ask Claude what it added, and to take the big files out of the branch (git rm, then commit)." >&2
+    echo "  What arrived is still in your copy's object store; to drop it: sudo -u dev git -C $TRUSTED gc --prune=now" >&2
+    exit 1
+  fi
 fi
-if [ "$size" -gt $((500 * 1048576)) ]; then
-  echo "Gleipnir: Claude's branch is big ($((size / 1048576)) MB packed); look for large files it added."
-fi
-# Into a holding reference first, so the branch in your copy is only moved once it's known
-# that nothing of yours would be lost
-incoming="refs/gleipnir/incoming"
-as_dev -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
-  fetch --quiet --no-tags --no-write-fetch-head "$stage/work.bundle" "+refs/heads/$branch:$incoming"
-new="$(as_dev rev-parse --verify --quiet "$incoming^{commit}")"
-if [ -z "$new" ]; then
-  as_dev update-ref -d "$incoming" 2>/dev/null || true
-  echo "Gleipnir: Claude's branch didn't arrive in one piece; nothing was changed." >&2
-  exit 1
-fi
-if current="$(as_dev rev-parse --verify --quiet "refs/heads/$dest^{commit}")" \
-    && ! as_dev merge-base --is-ancestor "$current" "$new"; then
+
+tip_of() { as_dev rev-parse --verify --quiet "refs/heads/$1^{commit}" || true; }
+current="$(tip_of "$dest")"
+if [ -n "$current" ] && ! as_dev merge-base --is-ancestor "$current" "$new"; then
   case "$dest" in
     incoming/*) ;;   # Claude's mirror: replaced
     *)
       echo "Gleipnir: your $dest has commits that Claude's doesn't, so it's left as it is."
       dest="incoming/$dest"
+      current="$(tip_of "$dest")"
       echo "  Claude's version is in your copy as $dest instead. Compare them: git log --oneline --graph $dest ${dest#incoming/}"
       ;;
   esac
 fi
-if [ "$(as_dev symbolic-ref --short -q HEAD || true)" = "$dest" ]; then
-  as_dev update-ref -d "$incoming"
+if [ "$current" = "$new" ]; then
+  echo "Gleipnir: your copy's $dest already has all of Claude's $branch; nothing new."
+  note_uncommitted
+  exit 0
+fi
+if checked_out "$dest"; then
   echo "Gleipnir: your copy has $dest checked out, so it can't be updated. Switch to main first: git switch main" >&2
   exit 1
 fi
-as_dev update-ref "refs/heads/$dest" "$new"
-as_dev update-ref -d "$incoming"
+# Git can't have a branch both above and below another (a/b beside a), so a name of yours
+# can be in the way of a new one
+if [ -z "$current" ]; then
+  above="$dest"
+  while [[ "$above" == */* ]]; do
+    above="${above%/*}"
+    if [ -n "$(tip_of "$above")" ]; then
+      echo "Gleipnir: your copy has a branch called $above, which is in the way of making $dest (git can't have both)." >&2
+      echo "  Rename yours (git branch -m $above <new name>) or ask Claude to rename its branch, then run it again." >&2
+      exit 1
+    fi
+  done
+  below="$(as_dev for-each-ref --count=1 --format='%(refname:short)' "refs/heads/$dest/")"
+  if [ -n "$below" ]; then
+    echo "Gleipnir: your copy has a branch called $below, which is in the way of making $dest (git can't have both)." >&2
+    echo "  Rename yours (git branch -m $below <new name>) or ask Claude to rename its branch, then run it again." >&2
+    exit 1
+  fi
+fi
+# Moved only from the value just checked: if the branch changed under this, nothing is lost
+zero="$(printf '%*s' "${#new}" '' | tr ' ' 0)"
+if ! as_dev update-ref "refs/heads/$dest" "$new" "${current:-$zero}" 2>/dev/null; then
+  echo "Gleipnir: your copy's $dest changed while this ran; nothing was changed. Run it again." >&2
+  exit 1
+fi
+as_dev update-ref -d "$INCOMING" >/dev/null 2>&1 || true
 
 # What arrived, compared with the branch you're on (usually main)
 base="$(as_dev symbolic-ref --short -q HEAD || true)"
