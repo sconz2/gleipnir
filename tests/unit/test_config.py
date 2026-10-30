@@ -87,6 +87,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(problems(extensions=["esbenp.prettier-vscode", "svelte.svelte-vscode@109.5.2"]), [])
         self.assertProblem(problems(extensions=["prettier"]), "isn't an extension ID")
 
+    def test_host_key_and_branches(self):
+        self.assertEqual(problems(repo_host_key="git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbc"), [])
+        self.assertProblem(problems(repo_host_key="AAAAC3"), "repo_host_key")
+        self.assertEqual(problems(claude={"branches": ["develop", "release/1.2", "*"]}), [])
+        self.assertProblem(problems(claude={"branches": ["bad name"]}), "claude.branches")
+        self.assertProblem(problems(claude={"branches": "develop"}), "claude.branches")
+
     def test_editor(self):
         self.assertEqual(problems(editor={"auth": "none"}), [])
         self.assertProblem(problems(editor={"auth": "token"}), "editor.auth")

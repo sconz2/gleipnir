@@ -71,6 +71,17 @@ trap 'rm -rf "$stage"' EXIT
 chmod 0755 "$stage"
 as_claude bundle create --quiet - "refs/heads/$branch" > "$stage/work.bundle"
 chmod 0644 "$stage/work.bundle"
+# Room for it: a branch full of huge files could fill the disk your copy is on
+size="$(stat -c %s "$stage/work.bundle")"
+free="$(df --output=avail -B1 "$TRUSTED" | tail -n 1)"
+if [ "$((size * 3))" -gt "$free" ]; then
+  echo "Gleipnir: Claude's branch is $((size / 1048576)) MB packed, and your copy's disk has only $((free / 1048576)) MB free; nothing was changed." >&2
+  echo "  Ask Claude what it added, and to take the big files out of the branch (git rm, then commit)." >&2
+  exit 1
+fi
+if [ "$size" -gt $((500 * 1048576)) ]; then
+  echo "Gleipnir: Claude's branch is big ($((size / 1048576)) MB packed); look for large files it added."
+fi
 # Into a holding reference first, so the branch in your copy is only moved once it's known
 # that nothing of yours would be lost
 incoming="refs/gleipnir/incoming"

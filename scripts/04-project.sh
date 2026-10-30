@@ -42,15 +42,20 @@ if [ -n "${GLEIPNIR_KEY:-}" ] && [ -n "$host" ]; then
   printf 'Host %s\n  IdentityFile ~/.ssh/deploy_key\n  IdentitiesOnly yes\n' "$host" > "$stage/config"
 fi
 
-# The server's SSH identity, so the first connection can't be impersonated
-if [ "$host" = "github.com" ]; then
+# The server's SSH identity, so the first connection can't be impersonated: the key you
+# give in the config (repo_host_key), GitHub's published ones, or else the server's own
+# word for it on first use
+host_key="$(cfg repo_host_key '')"
+if [ -n "$host_key" ]; then
+  printf '%s\n' "$host_key" > "$stage/known_hosts"
+elif [ "$host" = "github.com" ]; then
   # GitHub publishes its host keys; fetch them over HTTPS
   curl -fsSL https://api.github.com/meta | python3 -I -c '
 import json, sys
 for key in json.load(sys.stdin)["ssh_keys"]:
     print("github.com " + key)' > "$stage/known_hosts"
 elif [ -n "$host" ]; then
-  warn "Trusting $host's SSH key on first use"
+  warn "Trusting $host's SSH key on first use (to pin it, set repo_host_key in the machine's config)"
   ssh-keyscan "$host" > "$stage/known_hosts" 2>/dev/null || true
   [ -s "$stage/known_hosts" ] || rm -f "$stage/known_hosts"
 fi

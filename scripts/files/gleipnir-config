@@ -22,7 +22,7 @@ sys.dont_write_bytecode = True
 # Every setting, by section. None: a value (checked below); a dict: a section of its own.
 SCHEMA = {
     "name": None,  # from before machines were named by their file; ignored
-    "repo": None, "deploy_key": None, "env_file": None, "env_dir": None,
+    "repo": None, "repo_host_key": None, "deploy_key": None, "env_file": None, "env_dir": None,
     "claude_file": None, "context_dir": None, "node": None, "apps": None, "extensions": None,
     "git": {"name": None, "email": None},
     "vm": {"memory": None, "cpus": None},
@@ -33,7 +33,7 @@ SCHEMA = {
     "postgres": {"enabled": None, "version": None, "user": None, "password": None,
                  "databases": None, "createdb": None},
     "claude": {"network": None, "allowed_domains": None, "wip_branch": None,
-               "autocommit": None, "checks": None},
+               "autocommit": None, "checks": None, "branches": None},
     "runner": {"allowed_domains": None},
     "editor": {"auth": None},
 }
@@ -125,6 +125,10 @@ class Checker:
             self.problem("repo", "must be a git URL, with no spaces")
         for key in ("deploy_key", "env_file", "env_dir", "claude_file", "context_dir"):
             self.text(key, get(key))
+        host_key = get("repo_host_key")
+        self.text("repo_host_key", host_key, one_line=False)
+        if isinstance(host_key, str) and not all(len(line.split()) >= 3 for line in host_key.splitlines() if line.strip()):
+            self.problem("repo_host_key", 'must be known_hosts lines, like "git.example.com ssh-ed25519 AAAA..."')
 
         self.text("git.name", get("git", "name"))
         email = get("git", "email")
@@ -170,6 +174,9 @@ class Checker:
             self.problem("claude.network", 'must be "allowlist" or "open"')
         for key in ("wip_branch", "autocommit", "checks"):
             self.boolean(f"claude.{key}", get("claude", key))
+        self.text_list("claude.branches", get("claude", "branches"),
+                       lambda b: b == "*" or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._/-]*", b) and ".." not in b
+                       or self.problem("claude.branches", f'"{b}" isn\'t a branch name (or "*" for every branch)'))
         for where, value in (("claude.allowed_domains", get("claude", "allowed_domains")),
                              ("runner.allowed_domains", get("runner", "allowed_domains"))):
             self.text_list(where, value, lambda s, where=where: SITE.match(s.strip().lower()) or self.problem(

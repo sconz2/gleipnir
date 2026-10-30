@@ -245,7 +245,7 @@ Or in one step: `vagrant ssh my-project -- -t claude`. The first time, Claude Co
 The `claude` command:
 
 1. Checks that **Gjöll**, the firewall, is up, and refuses to start if it isn't.
-2. Brings your latest branches into Claude's copy, where Claude sees them as `trusted/<branch>`, such as `trusted/main`.
+2. Brings your latest work into Claude's copy, where Claude sees it as `trusted/<branch>`: the branch you have checked out, `main`, and any you list in `claude.branches`. Nothing else of yours is copied, since everything in Claude's copy, history included, is Claude's to read.
 3. Puts Claude on a `wip/<date>` branch, started from your current branch (usually `main`), so Claude's work stays off it. On the same day, Claude carries on with the branch it has.
 4. Takes a snapshot for **Heimdall**, then starts Claude Code as the restricted `claude` user, in `/srv/work`.
 5. When you exit Claude, prints Heimdall's summary of anything changed that can run code, and anything Gjöll blocked, then brings Claude's branch into your copy for review.
@@ -400,6 +400,7 @@ Each `machines/<name>.json` file supports:
 | Field | Default | What it sets |
 | --- | --- | --- |
 | `repo` | (required) | Git URL cloned into `/srv/project`, your copy. Claude's copy is made from yours |
+| `repo_host_key` | GitHub's published keys, or the server's own on first use | The git server's SSH host key, as `known_hosts` lines (`ssh-keyscan git.example.com` on your computer gives them), so the first clone can't be answered by an impostor. Worth setting for any server but GitHub |
 | `deploy_key` | `keys/<name>` | The repo's deploy key, if it's named differently. Relative to the Gleipnir folder |
 | `env_file` | `env/<name>.env` | The project's `.env`, if it's named differently. Relative to the Gleipnir folder |
 | `env_dir` | `env/<name>/` | The folder of each app's `.env`, if it's named differently. Relative to the Gleipnir folder |
@@ -428,6 +429,7 @@ Each `machines/<name>.json` file supports:
 | `runner.allowed_domains` | none | Sites the dev servers may reach, in the same form. With `claude.network` set to `open`, they can reach any site |
 | `claude.wip_branch` | `true` | Claude works on a `wip/` branch, and commits there only when you say. Off: Claude may commit on any branch, which arrives in your copy as `claude/<branch>`. (Formerly `claude.autocommit`, which still works) |
 | `claude.checks` | `true` | Heimdall's change checks |
+| `claude.branches` | none | Branches of yours to copy into Claude's copy as `trusted/<branch>`, besides the one you have checked out and `main`. `["*"]` copies every local branch |
 | `editor.auth` | `password` | `password` (made for each machine; see it with `gpass`), or `none` for no password |
 
 Gleipnir refuses to start if two machines, or two apps, use the same port, and tells you which. Provisioning checks the whole config first and lists every problem, before changing anything: a setting it doesn't know (most likely a typo), a wrong type or a value out of range. Keys starting with `_` are ignored, so you can use them for comments, in any section and among the apps.
@@ -481,6 +483,9 @@ Gleipnir keeps Claude well away from your computer, but inside the machine it is
 - **`.env` protection only covers Claude's file tools.** A shell command run by Claude can still read the files. Keep real production secrets out of these machines.
 - **Claude can read and change everything in its copy of the project**, including its `.git`, and the local database (the password is in `.env`). Use test data, not real personal records.
 - **The commit guards and npm setting are guardrails, not locks.** The real protection is that only you merge and push.
+- **Heimdall's per-turn notes come from inside Claude's session.** Their baseline lives in Claude's own cache, which Claude could alter. The summary when you exit, and the check when a branch arrives in your copy, run as `dev` from snapshots Claude can't reach, so those are the ones to trust.
+- **The package sites' security checks are uploads.** npm's and Composer's audit requests send a list of package names and versions to npm or Packagist, and the proxy can't tell a real one from a disguised one. The data only ever goes to those two services, never to anyone else.
+- **Editor extensions run as `dev`.** They come from the Open VSX registry at provision time, and a compromised extension would have your copy of the project and the deploy key. Pin versions (`esbenp.prettier-vscode@11.0.0`) and keep the list short.
 
 ## Licence
 
