@@ -27,7 +27,8 @@ usermod -aG project runner
 gpasswd -d dev project >/dev/null 2>&1 || true
 
 # A guard, in case a base box ever puts new users in an admin group
-for user in dev claude runner; do
+for user in dev claude runner browsers; do
+  id "$user" >/dev/null 2>&1 || continue
   if id -nG "$user" | grep -qwE 'sudo|admin|wheel'; then
     fail "$user is in an admin group; it must not have sudo"
   fi

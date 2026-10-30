@@ -8,7 +8,7 @@ Three layers, from quickest to most thorough.
 python3 -m unittest discover tests/unit
 ```
 
-- `test_heimdall.py`: Heimdall's checks. A changed or newly runnable git hook, a `package.json` deep in the project, a risky git setting, a link that's re-pointed, a huge file, a folder it can't read, terminal escapes in file names, and a branch whose commits change `package.json` while the working files are put back.
+- `test_heimdall.py`: Heimdall's checks. A changed or newly runnable git hook, a `package.json` deep in the project, Claude Code's settings and deploy files, a file made runnable (by any name, but not inside dependencies), `.git/info/attributes` and alternates, a risky git setting, a link that's re-pointed, a huge file edited past the part it reads, a folder it can't read, terminal escapes in file names, and a branch whose commits change `package.json` or add a runnable file while the working files are put back.
 - `test_apps.py`: the machine config's `apps`. Bad names, folders outside the project, Gleipnir's own ports, and two apps on the same port or folder.
 - `test_config.py`: the whole-config check that provisioning runs first. Typos in setting names, wrong types and ranges, comments (`_` keys), database names, versions written as text or numbers, extension IDs, site names, older configs, and the example configs passing.
 
@@ -32,7 +32,7 @@ It checks that each user can do what it should and nothing more:
 - **Users:** none has `sudo`; the box's `vagrant` account is locked and SSH takes keys only; no account that can use `sudo` has a password; `claude` and `runner` can't use cron, linger or polkit, and Gjöll starts before logins at boot.
 - **Your copy:** Claude and the dev servers can't see it. Git has no exceptions that would let `dev` work in Claude's copy.
 - **Claude's copy:** its `.git` is Claude's alone, and `dev`'s git refuses to run there. A hook and an `fsmonitor` setting planted in a repo of Claude's never run as `dev`.
-- **Settings:** Claude's managed settings, `CLAUDE.md` and `.npmrc` are root's.
+- **Settings:** Claude's managed settings, `CLAUDE.md` and `.npmrc` are root's, and npm's install scripts are off in Claude's environment.
 - **Gjöll:** every firewall rule is in place for IPv4 and IPv6, and `claude` and `runner` can't reach sshd on localhost. The network tests (no DNS, no direct connections, the proxy's refusals) run unless `--quick`.
 - **Dev servers:** they run as `runner` and can't see your copy. `dev` can control them and nothing else.
 - **The editor:** it asks for a password, which only root can read.

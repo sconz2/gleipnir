@@ -50,8 +50,10 @@ git_email="$(cfg git.email '')"
 if [ -n "$git_name" ]; then sudo -u claude -H git config --global user.name "$git_name"; fi
 if [ -n "$git_email" ]; then sudo -u claude -H git config --global user.email "$git_email"; fi
 
-# Owned by root so claude can't change it. Written with install, which replaces anything
-# claude left in its place (such as a link to another file) rather than writing through it.
+# npm's install scripts off. Claude's sessions get the same setting in their environment
+# (the managed settings, below), which a project's .npmrc can't override; this file covers
+# anything else. Owned by root so claude can't change it. Written with install, which
+# replaces anything claude left in its place (such as a link) rather than writing through it.
 npmrc="$(mktemp)"
 printf 'ignore-scripts=true\n' > "$npmrc"
 install -o root -g root -m 0644 "$npmrc" /home/claude/.npmrc
@@ -234,6 +236,11 @@ checks = sys.argv[1] == "true"
 
 env = {
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    # npm's install scripts off for every command Claude runs. Set here rather than only in
+    # ~/.npmrc because a project's own .npmrc (Claude's to write) would override that file;
+    # the environment wins over both. Re-enabling takes --ignore-scripts=false on the
+    # command itself, which you'd see.
+    "npm_config_ignore_scripts": "true",
     # No session links in commits (as well as the attribution settings below)
     "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1",
     # Your claude.ai connectors (Drive, Gmail and so on) stay out of the sandbox

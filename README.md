@@ -163,7 +163,7 @@ Claude runs Composer itself, as it does npm: Composer's catalogue (Packagist) an
 With `playwright.enabled` set to `true`, the machine installs Playwright's browsers (Chromium by default) and the system libraries they need. Your tests, and Claude, can then run them with `npx playwright test`.
 
 - **The browsers match your project's Playwright version** (in a monorepo, the first app that has Playwright). After upgrading Playwright in the project, run `vagrant provision my-project` to install the matching browsers.
-- **They're shared and read-only**, in `/opt/playwright`. Claude and the dev servers use them, and neither can change them, so don't run `npx playwright install`; provisioning does it.
+- **They're shared and read-only**, in `/opt/playwright`. Claude and the dev servers use them, and neither can change them, so don't run `npx playwright install`; provisioning does it. The version to install comes from the project, which Claude can write, so the download runs as a user of its own (`browsers`) with no rights beyond that folder; root only installs the system libraries, at the version pinned in `scripts/versions.sh`.
 - **They run headless**, since the machine has no screen. To see a test report, ask Claude to run `npx playwright show-report` in the background, then open `http://localhost:8080/proxy/9323/` (the editor passes it through).
 - **Reuse the dev server.** It's already running on the app's port (5173 for a project with one app), so in `playwright.config` point `webServer.url` at `http://localhost:<port>` with `reuseExistingServer: true`, or leave `webServer` out.
 
@@ -268,6 +268,8 @@ git branch -D wip/2026-10-29
 
 Keep `main` checked out: a branch you have checked out can't be updated with Claude's latest work. Your commits on `main` reach Claude at the start of its next session, as `trusted/main`.
 
+A branch in your copy is only ever moved forward. If you commit on a `wip/` branch yourself and Claude's version of it no longer contains your commits, yours is left alone and Claude's arrives beside it as `claude/wip/<date>`. The `claude/` branches are Claude's mirror, replaced whenever its branch changes, so don't commit on those.
+
 ### Claude's instructions
 
 `claude-instructions.md`, in the Gleipnir folder, is what Claude is told at the start of every session: how the machine works, its apps and dev servers, and the git rules above. Edit it there, then run `vagrant provision my-project`; every machine gets your version on its next provision, as a root-owned `/etc/claude-code/CLAUDE.md` that Claude can't change.
@@ -321,8 +323,8 @@ git push -u origin main
   Tools find the proxy through the standard `HTTPS_PROXY` setting, which Claude gets automatically. A tool that ignores it can't connect at all, rather than going round. The proxy and the database server are firewalled too: the proxy can only make HTTPS connections, and PostgreSQL can't connect out at all.
 
   The firewall's rules for IPv4 and IPv6 are each put in place in one step: all of them or none, so a failure leaves the previous rules as they were. Replies get through only as replies, so a connection opened before the rules changed (say, while `claude.network` was `"open"`) can't carry on afterwards. Claude won't start unless every rule is in place exactly as it was put there (`sudo gjoll-firewall --check` shows any difference; `sudo gjoll-firewall --verify` puts them back and tests them), and the proxy is running.
-- **Heimdall** flags changes to package scripts, tool configs and shell scripts, npm and Composer package changes in every app (watch for look-alike names), and new or changed git hooks and settings that run commands: after each turn, and in a summary when you exit. In Claude's copy it only reads files, and says so if it couldn't see everything (a folder it can't read, a link, a huge file). When Claude's branch arrives in your copy, it checks the branch's commits too: that's what you'd merge, whatever Claude's files look like.
-- **npm install scripts** are off by default for the `claude` user, including for the packages installed when the machine is set up.
+- **Heimdall** flags changes to the files it watches: package scripts, tool and deploy configs (Dockerfiles, `vercel.json` and the like), shell scripts, Claude Code's own project settings (`.mcp.json`, `.claude/`), GitHub workflows and actions, anything marked runnable, npm and Composer package changes in every app (watch for look-alike names), and new or changed git hooks and settings that run commands: after each turn, and in a summary when you exit. It doesn't read the project's ordinary source, which can run code too; that's what the diff is for, and it says so. In Claude's copy it only reads files, and says so if it couldn't see everything (a folder it can't read, a link, a huge file). When Claude's branch arrives in your copy, it checks the branch's commits too: that's what you'd merge, whatever Claude's files look like.
+- **npm install scripts** are off for everything Claude runs, set in its environment so that a `.npmrc` in the project can't turn them back on, and for the packages installed when the machine is set up. Claude can still run `npm install --ignore-scripts=false` on purpose, which you'd see.
 - **Git hooks** for Claude's commits: they must go on a `wip/` branch, and their messages can't credit Claude or Anthropic (no trailer, such as `Co-Authored-By:`, that mentions either, and no "Generated with Claude Code" lines).
 
 To let Claude reach another site, add it to `claude.allowed_domains` and run `vagrant provision my-project`; for the dev servers, use `runner.allowed_domains`. A name like `docs.example.com` allows just that site; `.example.com` (or `*.example.com`) allows `example.com` and everything under it. Avoid wildcards over a package site's neighbours: `.github.com`, for example, would also let Claude reach the rest of GitHub, uploads included (provisioning warns you). Setting `claude.network` to `"open"` removes the allowlist and the proxy entirely, for Claude and the dev servers; their connections are then logged (`sudo journalctl -k | grep gjoll`). Use it only on machines with nothing sensitive in them.
@@ -414,7 +416,7 @@ Each `machines/<name>.json` file supports:
 | `devserver.enabled` | `true` | Run the dev servers in the background |
 | `devserver.command` | worked out from the project | The command that starts the dev server (for a project with one app). It must listen on `$HOST` and `$PORT` |
 | `playwright.enabled` | `false` | Install Playwright's browsers |
-| `playwright.browsers` | `["chromium"]` | Which browsers: `chromium`, `firefox`, `webkit` (or `chrome`, `msedge`) |
+| `playwright.browsers` | `["chromium"]` | Which browsers: `chromium`, `firefox`, `webkit` |
 | `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry (add `@1.2.3` for a particular version) |
 | `postgres.enabled` | `false` | Install PostgreSQL |
 | `postgres.version` | 18 | PostgreSQL major version, 15 or later |

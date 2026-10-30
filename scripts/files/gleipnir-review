@@ -3,6 +3,11 @@
 # A wip/ branch of Claude's arrives in your copy (/srv/project) under the same name; any
 # other branch arrives as claude/<name>, so nothing of yours (main) can be replaced.
 #
+# A branch in your copy is only ever moved forward. If you've added commits of your own to
+# a wip/ branch and Claude's version no longer contains them, Claude's arrives beside yours
+# as claude/wip/<name> instead, and yours is left alone. The claude/ branches are Claude's
+# mirror, replaced whenever its branch changes, so don't commit on those.
+#
 #   sudo gleipnir-review             Claude's current branch
 #   sudo gleipnir-review wip/<date>  a branch you name
 #
@@ -66,8 +71,35 @@ trap 'rm -rf "$stage"' EXIT
 chmod 0755 "$stage"
 as_claude bundle create --quiet - "refs/heads/$branch" > "$stage/work.bundle"
 chmod 0644 "$stage/work.bundle"
+# Into a holding reference first, so the branch in your copy is only moved once it's known
+# that nothing of yours would be lost
+incoming="refs/gleipnir/incoming"
 as_dev -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
-  fetch --quiet --no-tags --no-write-fetch-head "$stage/work.bundle" "+refs/heads/$branch:refs/heads/$dest"
+  fetch --quiet --no-tags --no-write-fetch-head "$stage/work.bundle" "+refs/heads/$branch:$incoming"
+new="$(as_dev rev-parse --verify --quiet "$incoming^{commit}")"
+if [ -z "$new" ]; then
+  as_dev update-ref -d "$incoming" 2>/dev/null || true
+  echo "Gleipnir: Claude's branch didn't arrive in one piece; nothing was changed." >&2
+  exit 1
+fi
+if current="$(as_dev rev-parse --verify --quiet "refs/heads/$dest^{commit}")" \
+    && ! as_dev merge-base --is-ancestor "$current" "$new"; then
+  case "$dest" in
+    claude/*) ;;   # Claude's mirror: replaced
+    *)
+      echo "Gleipnir: your $dest has commits that Claude's doesn't, so it's left as it is."
+      dest="claude/$dest"
+      echo "  Claude's version is in your copy as $dest instead. Compare them: git log --oneline --graph $dest ${dest#claude/}"
+      ;;
+  esac
+fi
+if [ "$(as_dev symbolic-ref --short -q HEAD || true)" = "$dest" ]; then
+  as_dev update-ref -d "$incoming"
+  echo "Gleipnir: your copy has $dest checked out, so it can't be updated. Switch to main first: git switch main" >&2
+  exit 1
+fi
+as_dev update-ref "refs/heads/$dest" "$new"
+as_dev update-ref -d "$incoming"
 
 # What arrived, compared with the branch you're on (usually main)
 base="$(as_dev symbolic-ref --short -q HEAD || true)"

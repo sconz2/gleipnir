@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.dont_write_bytecode = True  # no __pycache__ beside the scripts
@@ -153,6 +154,52 @@ class WorkingTreeTest(unittest.TestCase):
         state = heimdall.take_state(self.root)
         self.assertIn("couldn't read the folder hidden", state["incomplete"])
 
+    def test_claude_code_settings_and_deploy_files(self):
+        out = self.diff(lambda: (write(self.path(".mcp.json"), "{}"),
+                                 write(self.path(".claude", "settings.json"), "{}"),
+                                 write(self.path(".github", "actions", "x", "action.yml"), "runs: {}"),
+                                 write(self.path("Dockerfile"), "FROM scratch"),
+                                 write(self.path("vercel.json"), "{}")))
+        for name in (".mcp.json", ".claude/settings.json", ".github/actions/x/action.yml", "Dockerfile", "vercel.json"):
+            self.assertIn(f"added   {name}", out)
+
+    def test_runnable_file_counts_whatever_its_name(self):
+        out = self.diff(lambda: write(self.path("bin", "serve"), "#!/bin/sh\n", 0o755))
+        self.assertIn("added   bin/serve", out)
+        # ...but not inside dependencies, and not when it isn't runnable
+        write(self.path("src", "helper"), "x")
+        out = self.diff(lambda: (write(self.path("node_modules", "x", "cli"), "x", 0o755),
+                                 write(self.path("src", "helper"), "y")))
+        self.assertEqual(out, "")
+
+    def test_making_a_file_runnable_is_a_change(self):
+        write(self.path("tool"), "x", 0o644)
+        out = self.diff(lambda: os.chmod(self.path("tool"), 0o755))
+        self.assertIn("added   tool", out)   # it wasn't a watched file before; now it is
+        out = self.diff(lambda: os.chmod(self.path("tool"), 0o644))
+        self.assertIn("removed tool", out)
+
+    def test_git_attributes_and_alternates(self):
+        out = self.diff(lambda: (write(self.path(".git", "info", "attributes"), "*.c filter=x"),
+                                 write(self.path(".git", "objects", "info", "alternates"), "/elsewhere")))
+        self.assertIn("added   .git/info/attributes", out)
+        self.assertIn("added   .git/objects/info/alternates", out)
+
+    def test_big_file_edited_past_the_hashed_part(self):
+        old = heimdall.MAX_HASH_BYTES
+        heimdall.MAX_HASH_BYTES = 1024
+        try:
+            write(self.path("build.sh"), "x" * 4096)
+            before = heimdall.take_state(self.root)
+            time.sleep(0.01)
+            with open(self.path("build.sh"), "r+") as fh:   # same size, same first 1024 bytes
+                fh.seek(4090)
+                fh.write("evil!!")
+            out = "\n".join(heimdall.diff_states(before, heimdall.take_state(self.root)))
+        finally:
+            heimdall.MAX_HASH_BYTES = old
+        self.assertIn("changed build.sh", out)
+
     def test_terminal_escapes_are_made_harmless(self):
         out = self.diff(lambda: write(self.path("evil\x1b[31mred.sh"), "x"))
         self.assertNotIn("\x1b", out)
@@ -199,6 +246,16 @@ class BranchReviewTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", "code")
         self.assertEqual(heimdall.review_lines(self.repo, "refs/heads/main", "refs/heads/wip/y"), [])
+
+    def test_runnable_file_in_a_commit(self):
+        self.git("checkout", "-q", "-b", "wip/z")
+        write(os.path.join(self.repo, "scripts", "deploy"), "#!/bin/sh\n", 0o755)
+        write(os.path.join(self.repo, "src", "app.ts"), "export {}")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "tool")
+        out = "\n".join(heimdall.review_lines(self.repo, "refs/heads/main", "refs/heads/wip/z"))
+        self.assertIn("added   scripts/deploy", out)
+        self.assertNotIn("app.ts", out)
 
     def test_no_base_branch(self):
         out = "\n".join(heimdall.review_lines(self.repo, "", "refs/heads/main"))

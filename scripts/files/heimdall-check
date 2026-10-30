@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Gleipnir: Heimdall, the change checks. Flags changes to files that can run
-code (package scripts, tool configs, shell scripts), npm and Composer package
-changes (in every app's lock file), and git settings or hooks that run commands.
+"""Gleipnir: Heimdall, the change checks. Flags changes to the files it watches, the ones
+that can make something run code: package scripts, tool and deploy configs, shell scripts,
+Claude Code's own settings, anything marked runnable; npm and Composer package changes (in
+every app's lock file); and git settings or hooks that run commands. It doesn't read the
+project's ordinary source, which can run code too: that's what the diff is for.
 
 In Claude's copy of the project it only reads files: it never runs git or anything
 else there, so nothing Claude wrote runs because of it.
@@ -41,14 +43,27 @@ SENSITIVE_NAMES = [
     ".npmrc", ".yarnrc", ".yarnrc.yml", ".envrc", "Makefile", "Vagrantfile", "*.sh",
     "*.config.js", "*.config.cjs", "*.config.mjs", "*.config.ts", "*.config.cts", "*.config.mts",
     ".eslintrc*", ".prettierrc*", ".babelrc*", ".gitattributes", ".gitmodules",
+    # Claude Code's own project settings: MCP servers, hooks and commands
+    ".mcp.json",
+    # Task runners, git hook managers and workspaces
+    "Taskfile.yml", "Taskfile.yaml", "justfile", "Justfile", ".pre-commit-config.yaml",
+    "lefthook.yml", ".lefthook.yml", "turbo.json", "nx.json", "*.workspace.ts", "*.workspace.js",
+    "*.workspace.mts", "*.workspace.mjs",
+    # Containers and deploy settings, which say what to run elsewhere
+    "Dockerfile", "Dockerfile.*", "*.Dockerfile", "docker-compose*.yml", "docker-compose*.yaml",
+    "compose*.yml", "compose*.yaml", "Procfile", "netlify.toml", "vercel.json", "fly.toml",
+    "render.yaml", "app.json",
     # PHP: Composer's packages, scripts, plugins and credentials, and tools that load PHP files
     "composer.json", "composer.lock", "auth.json", "artisan", "phpunit.xml", "phpunit.xml.dist",
     "phpstan.neon", "phpstan.neon.dist", "rector.php", ".php-cs-fixer.php", ".php-cs-fixer.dist.php",
 ]
 # Lock files, whose packages are compared one by one
 LOCK_FILES = {"package-lock.json", "composer.lock"}
-# Every file inside these folders counts (editor tasks, IDE run configurations, git hook managers)
-SENSITIVE_DIRS = {".vscode", ".idea", ".husky"}
+# Every file inside these folders counts (editor tasks, IDE run configurations, git hook
+# managers, Claude Code's settings, GitHub's workflows and actions)
+SENSITIVE_DIRS = {".vscode", ".idea", ".husky", ".claude", ".github"}
+# Files in .git (besides the hooks) that change what git does with the repo
+GIT_EXTRAS = ["info/attributes", "info/exclude", "objects/info/alternates"]
 # Changes constantly while you work
 IGNORED_FILES = {os.path.join(".idea", "workspace.xml")}
 # Git settings whose value is a command git will run (or that bring in more settings)
@@ -90,9 +105,14 @@ def is_sensitive(rel):
     folders, name = parts[:-1], parts[-1]
     if rel in IGNORED_FILES or SKIP_DIRS.intersection(folders):
         return False
-    if SENSITIVE_DIRS.intersection(folders) or folders[:2] == [".github", "workflows"]:
+    if SENSITIVE_DIRS.intersection(folders):
         return True
     return any(fnmatch.fnmatch(name, pattern) for pattern in SENSITIVE_NAMES)
+
+
+def runnable(mode):
+    """An ordinary file marked runnable (any execute bit) counts whatever it's called."""
+    return stat.S_ISREG(mode) and bool(mode & 0o111)
 
 
 class Scan:
@@ -101,7 +121,7 @@ class Scan:
     def __init__(self, root):
         self.root = root
         self.incomplete = []
-        self.files = []        # (parts, name) for every file seen
+        self.files = []        # (parts, name, runnable) for every file seen
         self._walk()
 
     def note(self, problem):
@@ -125,7 +145,11 @@ class Scan:
                 dirs[:] = []
             entries += len(files) + len(dirs)
             for name in files:
-                self.files.append((parts, name))
+                try:
+                    mode = os.lstat(os.path.join(cur, name)).st_mode
+                except OSError:
+                    mode = 0
+                self.files.append((parts, name, runnable(mode)))
             if entries > MAX_ENTRIES:
                 self.note(f"stopped after {MAX_ENTRIES} files and folders")
                 break
@@ -134,12 +158,16 @@ class Scan:
                 break
 
     def sensitive_files(self):
-        return sorted(rel for rel in (os.path.join(*parts, name) if parts else name
-                                      for parts, name in self.files) if is_sensitive(rel))
+        found = []
+        for parts, name, can_run in self.files:
+            rel = os.path.join(*parts, name) if parts else name
+            if is_sensitive(rel) or (can_run and not SKIP_DIRS.intersection(parts)):
+                found.append(rel)
+        return sorted(found)
 
     def lock_files(self):
         return sorted(os.path.join(*parts, name) if parts else name
-                      for parts, name in self.files if name in LOCK_FILES)
+                      for parts, name, _ in self.files if name in LOCK_FILES)
 
 
 def open_regular(path):
@@ -156,7 +184,7 @@ def open_regular(path):
 
 
 def file_hash(path, with_mode=False):
-    """A file's fingerprint: its contents (and, for hooks, whether it can be run). Returns
+    """A file's fingerprint: its contents (and, with_mode, whether it can be run). Returns
     (fingerprint, problem): problem says why the check couldn't see the file fully."""
     try:
         info = os.lstat(path)
@@ -190,7 +218,9 @@ def file_hash(path, with_mode=False):
         return f"can't be read ({info.st_size} bytes)", "can't be read"
     fingerprint = digest.hexdigest()
     if info.st_size > MAX_HASH_BYTES:
-        fingerprint += f" (first {MAX_HASH_BYTES} of {info.st_size} bytes)"
+        # The rest isn't read, so the time the file was last changed stands in for it: the
+        # system sets that on every write, and no user can set it back
+        fingerprint += f" (first {MAX_HASH_BYTES} of {info.st_size} bytes, changed {info.st_ctime_ns})"
         problem = "is too big to check fully"
     if with_mode:
         fingerprint = f"{stat.filemode(mode)} {fingerprint}"
@@ -304,7 +334,7 @@ def git_config_entries(text):
 def git_state(root, scan):
     """Hooks (each with its fingerprint), and settings that run commands, read from the files
     in .git without running git."""
-    state = {"hooks": {}, "config": []}
+    state = {"hooks": {}, "config": [], "extras": {}}
     gitdir = os.path.join(root, ".git")
     try:
         if not stat.S_ISDIR(os.lstat(gitdir).st_mode):
@@ -326,6 +356,13 @@ def git_state(root, scan):
             state["hooks"][name] = fingerprint
             if problem:
                 scan.note(f".git/hooks/{name} {problem}")
+    for extra in GIT_EXTRAS:
+        path = os.path.join(gitdir, extra)
+        if os.path.lexists(path):
+            fingerprint, problem = file_hash(path)
+            state["extras"][extra] = fingerprint
+            if problem:
+                scan.note(f".git/{extra} {problem}")
     for config in ("config", "config.worktree"):
         path = os.path.join(gitdir, config)
         if not os.path.lexists(path):
@@ -345,7 +382,7 @@ def take_state(root):
     scan = Scan(root)
     files = {}
     for rel in scan.sensitive_files():
-        fingerprint, problem = file_hash(os.path.join(root, rel))
+        fingerprint, problem = file_hash(os.path.join(root, rel), with_mode=True)
         files[rel] = fingerprint
         if problem:
             scan.note(f"{rel} {problem}")
@@ -401,7 +438,7 @@ def diff_states(old, new, all_incomplete=True):
     lines = []
     changed = changes(old.get("files", {}), new["files"])
     if changed:
-        lines.append("Files that can run code were changed:")
+        lines.append("Watched files were changed (package, config and deploy files, scripts, runnable files):")
         lines += [f"  {kind}{path}" for kind, path in changed]
 
     lines += package_lines(package_changes(old.get("packages", {}), new["packages"]))
@@ -411,10 +448,12 @@ def diff_states(old, new, all_incomplete=True):
     if isinstance(old_hooks, list):  # a baseline from an earlier version: names only
         old_hooks = {name: new_git["hooks"].get(name) for name in old_hooks}
     hooks = changes(old_hooks, new_git["hooks"])
+    extras = changes(old_git.get("extras", {}), new_git.get("extras", {}))
     new_config = sorted(set(new_git["config"]) - set(old_git.get("config", [])))
-    if hooks or new_config:
+    if hooks or extras or new_config:
         lines.append("Git hooks or settings that run commands were changed:")
         lines += [f"  {kind}.git/hooks/{name}" for kind, name in hooks]
+        lines += [f"  {kind}.git/{name}" for kind, name in extras]
         lines += [f"  added   .git/{c}" for c in new_config]
 
     incomplete = new.get("incomplete", [])
@@ -461,24 +500,32 @@ def review_lines(repo, base, branch):
             start = git(repo, "merge-base", base, branch).strip() or None
         except RuntimeError:
             start = None
+    changed = []   # (status, path, runnable now)
     if start:
-        listing = git(repo, "diff", "--no-renames", "--name-status", "-z", start, branch)
+        # --raw gives the modes too: a file marked runnable counts whatever it's called
+        listing = git(repo, "diff", "--no-renames", "--raw", "-z", start, branch)
+        fields = listing.split("\0")
+        for meta, path in zip(fields[0::2], fields[1::2]):
+            if path and meta.startswith(":"):
+                bits = meta[1:].split()
+                if len(bits) >= 5:
+                    changed.append((bits[4][:1], path, bits[1].endswith("755")))
     else:  # nothing in common: everything on the branch is new
-        listing = git(repo, "ls-tree", "-r", "-z", "--name-only", branch)
-        listing = "".join(f"A\0{name}\0" for name in listing.split("\0") if name)
-    fields = listing.split("\0")
-    changed = []
-    for status, path in zip(fields[0::2], fields[1::2]):
-        if path:
-            changed.append((status[:1], path))
+        listing = git(repo, "ls-tree", "-r", "-z", branch)
+        for entry in listing.split("\0"):
+            if "\t" in entry:
+                meta, path = entry.split("\t", 1)
+                bits = meta.split()
+                changed.append(("A", path, bits[0].endswith("755") if bits else False))
     kinds = {"A": "added   ", "M": "changed ", "D": "removed ", "T": "changed "}
     lines = []
-    sensitive = [(kinds.get(status, "changed "), path) for status, path in changed if is_sensitive(path)]
+    sensitive = [(kinds.get(status, "changed "), path) for status, path, can_run in changed
+                 if is_sensitive(path) or (can_run and not SKIP_DIRS.intersection(path.split("/")[:-1]))]
     if sensitive:
-        lines.append("Files that can run code were changed:")
+        lines.append("Watched files were changed (package, config and deploy files, scripts, runnable files):")
         lines += [f"  {kind}{path}" for kind, path in sensitive]
     old_packages, new_packages = {}, {}
-    for status, path in changed:
+    for status, path, _ in changed:
         if os.path.basename(path) in LOCK_FILES:
             old_packages.update(packages_from(blob(repo, start, path, problems), path))
             new_packages.update(packages_from(blob(repo, branch, path, problems), path))
@@ -502,7 +549,8 @@ def run_review(repo, base, branch):
             print(line)
         print("=" * 72)
     else:
-        print(f"Heimdall: nothing on {printable(name)} changes files that can run code.")
+        print(f"Heimdall: nothing on {printable(name)} changes the files it watches (package, config and deploy "
+              "files, scripts, runnable files, git settings). The rest of the diff is yours to read.")
 
 
 # --- Saving and loading checks ---------------------------------------------------------------
@@ -561,7 +609,8 @@ def run_summary(snapshot, directory):
             print(line)
         print("=" * 72)
     else:
-        print("Heimdall: nothing that can run code changed in Claude's copy this session.")
+        print("Heimdall: nothing changed this session among the files it watches (package, config and deploy "
+              "files, scripts, runnable files, git settings). Ordinary source may have.")
 
 
 def main(argv):

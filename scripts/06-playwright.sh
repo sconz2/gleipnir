@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Gleipnir: Playwright's browsers (optional), shared by everyone in the machine.
 #
-# The browsers go in /opt/playwright, owned by root, so tests run by you, Claude or the dev
-# servers use them but none can change them. They're installed with a fresh copy of
-# Playwright from npm, never the project's own copy: anything in node_modules could have
-# been changed by Claude, and this runs as root.
+# The browsers go in /opt/playwright, where tests run by you, Claude or the dev servers use
+# them but none can change them. The version comes from the project, so the browsers match
+# its Playwright; but that's a number Claude can write, so nothing it picks ever runs as
+# root. Root installs the system libraries using the version pinned in scripts/versions.sh,
+# and the browsers themselves are downloaded by a user of their own, "browsers", with no
+# rights beyond that folder, using a fresh copy of Playwright from npm (never the project's
+# own copy, which Claude could have changed).
 set -euo pipefail
 source "$GLEIPNIR_SRC/scripts/lib.sh"
 export DEBIAN_FRONTEND=noninteractive
 
 BROWSERS=/opt/playwright
+INSTALLER=browsers                        # downloads the browsers; owns their folder
+INSTALLER_HOME=/var/lib/gleipnir/browsers
 PROFILE=/etc/profile.d/gleipnir-playwright.sh
 DEVSERVER_ENV=/etc/systemd/system/gleipnir-dev@.service.d/playwright.conf
 OLD_USER_ENV=/etc/environment.d/60-gleipnir-playwright.conf   # earlier versions
@@ -82,24 +87,38 @@ mapfile -t WANTED < <(cfg playwright.browsers chromium | sed '/^$/d')
 [ "${#WANTED[@]}" -gt 0 ] || WANTED=(chromium)
 for browser in "${WANTED[@]}"; do
   case "$browser" in
-    chromium|firefox|webkit|chrome|msedge) ;;
-    *) fail "playwright.browsers: unknown browser \"$browser\" (use chromium, firefox or webkit)" ;;
+    chromium|firefox|webkit) ;;
+    *) fail "playwright.browsers: \"$browser\" isn't one Gleipnir can install (use chromium, firefox or webkit)" ;;
   esac
 done
 
-# --- Install the browsers and the system libraries they need ----------------------------
-log "Installing Playwright $VERSION browsers: ${WANTED[*]}"
+# --- The system libraries the browsers need: as root, at the pinned version ------------------
+log "Installing the system libraries for Playwright's browsers (Playwright $PLAYWRIGHT_DEFAULT_VERSION's list)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-install -d -m 0755 "$BROWSERS"
 (
   cd "$work"
   export HOME="$work" npm_config_cache="$work/npm-cache" npm_config_ignore_scripts=true
-  export PLAYWRIGHT_BROWSERS_PATH="$BROWSERS"
-  npx --yes "playwright@$VERSION" install --with-deps "${WANTED[@]}" > "$work/install.log" 2>&1 \
-    || { tail -n 30 "$work/install.log" >&2; fail "Playwright's browser install failed"; }
+  npx --yes "playwright@$PLAYWRIGHT_DEFAULT_VERSION" install-deps "${WANTED[@]}" > "$work/deps.log" 2>&1 \
+    || { tail -n 30 "$work/deps.log" >&2; fail "the browsers' system libraries didn't install"; }
 )
-chown -R root:root "$BROWSERS"
+
+# --- The browsers: as their own user, at the project's version -----------------------------
+if ! id "$INSTALLER" >/dev/null 2>&1; then
+  useradd --system --home-dir "$INSTALLER_HOME" --create-home --shell /usr/sbin/nologin "$INSTALLER"
+fi
+install -d -o "$INSTALLER" -g "$INSTALLER" -m 0700 "$INSTALLER_HOME"
+install -d -o "$INSTALLER" -g "$INSTALLER" -m 0755 "$BROWSERS"
+chown -R "$INSTALLER:$INSTALLER" "$BROWSERS"
+log "Installing Playwright $VERSION browsers: ${WANTED[*]}"
+# shellcheck disable=SC2024  # root keeping the log is the point
+if ! sudo -u "$INSTALLER" -H env HOME="$INSTALLER_HOME" npm_config_cache="$INSTALLER_HOME/npm-cache" \
+    npm_config_ignore_scripts=true PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" \
+    bash -c 'cd "$HOME" && npx --yes "playwright@$1" install "${@:2}"' _ "$VERSION" "${WANTED[@]}" > "$work/install.log" 2>&1; then
+  tail -n 30 "$work/install.log" >&2
+  fail "Playwright's browser install failed"
+fi
+# Readable by everyone, changeable by nobody who runs code (claude, runner) or by you
 chmod -R u=rwX,go=rX "$BROWSERS"
 
 # --- Point every user at them ------------------------------------------------------------

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Gleipnir: each app's packages (npm and Composer), on first setup.
 #
-# Installed as claude, inside Gjöll, with the same proxy settings as Claude's sessions:
-# a package's install scripts are code from the internet, so they get exactly what Claude's
-# own commands would, never dev's access (the editor, your copy of the project, the deploy key).
-# After this, installing packages is up to Claude.
+# Installed as claude, inside Gjöll, with the same proxy settings as Claude's sessions and
+# npm's install scripts off: packages are code from the internet, so they get exactly what
+# Claude's own commands would, never dev's access (the editor, your copy of the project, the
+# deploy key). After this, installing packages is up to Claude.
 set -euo pipefail
 source "$GLEIPNIR_SRC/scripts/lib.sh"
 
@@ -43,7 +43,8 @@ while IFS=$'\t' read -r name folder _; do
   if [ -f "$dir/package.json" ] && [ ! -e "$dir/node_modules" ]; then
     if [ -f "$dir/package-lock.json" ]; then install_cmd=(npm ci); else install_cmd=(npm install); fi
     log "Installing npm packages for $label (${install_cmd[*]})"
-    if ! as_claude_in "$dir" "${install_cmd[@]}" --no-audit --no-fund --loglevel=error; then
+    # --ignore-scripts on the command itself: a .npmrc in the project can't turn it back on
+    if ! as_claude_in "$dir" "${install_cmd[@]}" --ignore-scripts --no-audit --no-fund --loglevel=error; then
       warn "$label: ${install_cmd[*]} failed. Ask Claude to install its packages in $folder/."
     fi
   fi

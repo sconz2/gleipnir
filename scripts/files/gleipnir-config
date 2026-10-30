@@ -46,7 +46,7 @@ DATABASE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$")
 SITE = re.compile(r"^(\*\.|\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?$")
 # publisher.name, optionally @version
 EXTENSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*(@[0-9][0-9A-Za-z.+-]*)?$")
-BROWSERS = {"chromium", "firefox", "webkit", "chrome", "msedge"}
+BROWSERS = {"chromium", "firefox", "webkit"}   # not chrome or msedge: Playwright installs those as root
 
 
 class Checker:

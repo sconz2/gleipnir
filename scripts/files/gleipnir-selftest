@@ -167,8 +167,10 @@ for file in /etc/claude-code/managed-settings.json /etc/claude-code/CLAUDE.md; d
   shouldnt "claude can't change $file" sudo -u claude test -w "$file"
 done
 shouldnt "claude can't change /etc/claude-code" sudo -u claude test -w /etc/claude-code
-# A guardrail rather than a lock: claude can override it on purpose
+# A guardrail rather than a lock: claude can override it on purpose, on the command line
 should "npm install scripts are off for claude by default" is "$(sudo -u claude -H npm config get ignore-scripts 2>/dev/null)" true
+should "...and Claude's sessions set that in the environment, which a project's .npmrc can't override" \
+  bash -c "python3 -I -c 'import json, sys; sys.exit(0 if json.load(open(\"/etc/claude-code/managed-settings.json\"))[\"env\"].get(\"npm_config_ignore_scripts\") == \"true\" else 1)'"
 should "the machine's config is root's only (600)" is "$(owner_mode /etc/gleipnir/config.json)" "root:root 600"
 refused "claude can't read the machine's config (passwords)" "permission denied" sudo -u claude cat /etc/gleipnir/config.json
 refused "runner can't read the machine's config (passwords)" "permission denied" sudo -u runner cat /etc/gleipnir/config.json
