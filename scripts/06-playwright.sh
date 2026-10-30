@@ -4,17 +4,19 @@
 # The browsers go in /opt/playwright, where tests run by you, Claude or the dev servers use
 # them but none can change them. The version comes from the project, so the browsers match
 # its Playwright; but that's a number Claude can write, so nothing it picks ever runs as
-# root. Root installs the system libraries using the version pinned in scripts/versions.sh,
-# and the browsers themselves are downloaded by a user of their own, "browsers", with no
-# rights beyond that folder, using a fresh copy of Playwright from npm (never the project's
-# own copy, which Claude could have changed).
+# root. Everything from npm runs as a user of its own, "browsers", with no rights beyond
+# that folder: it asks Playwright (the version pinned in scripts/versions.sh) which system
+# libraries the browsers need, and root installs just those with apt; then it downloads
+# the browsers with the project's version of Playwright, a fresh copy from npm (never the
+# project's own, which Claude could have changed). Once they're in, the folder is root's,
+# and nothing of that user's is left running or kept.
 set -euo pipefail
 source "$GLEIPNIR_SRC/scripts/lib.sh"
 export DEBIAN_FRONTEND=noninteractive
 
 BROWSERS=/opt/playwright
-INSTALLER=browsers                        # downloads the browsers; owns their folder
-INSTALLER_HOME=/var/lib/gleipnir/browsers
+INSTALLER=browsers                        # downloads the browsers
+INSTALLER_HOME="$BROWSERS_HOME"
 PROFILE=/etc/profile.d/gleipnir-playwright.sh
 DEVSERVER_ENV=/etc/systemd/system/gleipnir-dev@.service.d/playwright.conf
 OLD_USER_ENV=/etc/environment.d/60-gleipnir-playwright.conf   # earlier versions
@@ -92,34 +94,76 @@ for browser in "${WANTED[@]}"; do
   esac
 done
 
-# --- The system libraries the browsers need: as root, at the pinned version ------------------
-log "Installing the system libraries for Playwright's browsers (Playwright $PLAYWRIGHT_DEFAULT_VERSION's list)"
+# --- The user that does the downloading -------------------------------------------------
+id "$INSTALLER" >/dev/null 2>&1 || fail "there's no $INSTALLER user (scripts/02-users.sh makes it)"
+# Nothing of an earlier run is still about, and nothing it fetched (npm's cache, Playwright
+# itself) is kept: its home is emptied before and after
+stop_installer() {
+  for _ in 1 2 3 4 5; do
+    pkill -KILL -u "$INSTALLER" 2>/dev/null || return 0
+    sleep 0.2
+  done
+}
+reset_home() {
+  rm -rf "$INSTALLER_HOME"
+  install -d -o "$INSTALLER" -g "$INSTALLER" -m 0700 "$INSTALLER_HOME"
+}
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-(
-  cd "$work"
-  export HOME="$work" npm_config_cache="$work/npm-cache" npm_config_ignore_scripts=true
-  npx --yes "playwright@$PLAYWRIGHT_DEFAULT_VERSION" install-deps "${WANTED[@]}" > "$work/deps.log" 2>&1 \
-    || { tail -n 30 "$work/deps.log" >&2; fail "the browsers' system libraries didn't install"; }
-)
-
-# --- The browsers: as their own user, at the project's version -----------------------------
-if ! id "$INSTALLER" >/dev/null 2>&1; then
-  useradd --system --home-dir "$INSTALLER_HOME" --create-home --shell /usr/sbin/nologin "$INSTALLER"
-fi
-install -d -o "$INSTALLER" -g "$INSTALLER" -m 0700 "$INSTALLER_HOME"
-install -d -o "$INSTALLER" -g "$INSTALLER" -m 0755 "$BROWSERS"
-chown -R "$INSTALLER:$INSTALLER" "$BROWSERS"
-log "Installing Playwright $VERSION browsers: ${WANTED[*]}"
-# shellcheck disable=SC2024  # root keeping the log is the point
-if ! sudo -u "$INSTALLER" -H env HOME="$INSTALLER_HOME" npm_config_cache="$INSTALLER_HOME/npm-cache" \
+trap 'stop_installer; reset_home; rm -rf "$work"' EXIT
+stop_installer
+reset_home
+# A command as that user, in its own home, with Playwright's downloads going to $BROWSERS
+as_installer() {
+  sudo -u "$INSTALLER" -H env HOME="$INSTALLER_HOME" npm_config_cache="$INSTALLER_HOME/npm-cache" \
     npm_config_ignore_scripts=true PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" \
-    bash -c 'cd "$HOME" && npx --yes "playwright@$1" install "${@:2}"' _ "$VERSION" "${WANTED[@]}" > "$work/install.log" 2>&1; then
+    bash -c 'cd "$HOME" && "$@"' _ "$@"
+}
+
+# --- The system libraries the browsers need: Playwright names them, root installs them ------
+# "install-deps --dry-run" has apt simulate the install and lists what's missing, one package
+# a line, leaving with 1 when something is: nothing from npm runs as root.
+log "Asking Playwright $PLAYWRIGHT_DEFAULT_VERSION which system libraries the browsers need"
+set +e
+as_installer npx --yes "playwright@$PLAYWRIGHT_DEFAULT_VERSION" install-deps --dry-run "${WANTED[@]}" \
+  > "$work/deps.out" 2> "$work/deps.err"
+asked=$?
+set -e
+case "$asked" in
+  0|1) ;;
+  *) tail -n 30 "$work/deps.err" >&2; fail "couldn't find out which system libraries the browsers need (playwright install-deps --dry-run)" ;;
+esac
+mapfile -t PACKAGES < <(sed -n 's/^  \([a-z0-9][a-z0-9.+-]*\)$/\1/p' "$work/deps.out")
+if [ "$asked" -eq 1 ] && [ "${#PACKAGES[@]}" -eq 0 ]; then
+  tail -n 30 "$work/deps.out" >&2
+  fail "Playwright says system libraries are missing but didn't list them in the form Gleipnir reads (playwright install-deps --dry-run)"
+fi
+if [ "${#PACKAGES[@]}" -gt 0 ]; then
+  log "Installing ${#PACKAGES[@]} system libraries for the browsers"
+  apt-get install -y --no-install-recommends "${PACKAGES[@]}" > "$work/apt.log" 2>&1 \
+    || { tail -n 30 "$work/apt.log" >&2; fail "the browsers' system libraries didn't install"; }
+else
+  log "The browsers' system libraries are all installed"
+fi
+
+# --- The browsers: downloaded by that user, at the project's version, then root's ----------
+install -d -m 0755 "$BROWSERS"
+chown -R -h "$INSTALLER:$INSTALLER" "$BROWSERS"   # -h: links themselves, never what they point at
+log "Installing Playwright $VERSION browsers: ${WANTED[*]}"
+if ! as_installer npx --yes "playwright@$VERSION" install "${WANTED[@]}" > "$work/install.log" 2>&1; then
   tail -n 30 "$work/install.log" >&2
   fail "Playwright's browser install failed"
 fi
-# Readable by everyone, changeable by nobody who runs code (claude, runner) or by you
+stop_installer
+# Root's from here on: readable by everyone, changeable by nobody who runs code, not even
+# the user that downloaded them. A link leading out of the folder has no business in it.
+chown -R -h root:root "$BROWSERS"
 chmod -R u=rwX,go=rX "$BROWSERS"
+while IFS= read -r -d '' link; do
+  case "$(readlink -f -- "$link" || true)" in
+    "$BROWSERS"/*) ;;
+    *) rm -f -- "$link"; warn "Removed $link, a link leading out of $BROWSERS" ;;
+  esac
+done < <(find "$BROWSERS" -type l -print0)
 
 # --- Point every user at them ------------------------------------------------------------
 # Login shells (vagrant ssh, and Claude's sessions)

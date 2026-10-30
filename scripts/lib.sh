@@ -10,6 +10,7 @@ TRUSTED=/srv/project            # your copy of the project: dev's, which Claude 
 WORK=/srv/work                  # Claude's copy: where it works and the dev servers run
 CONTEXT_DIR=/srv/context        # background files for Claude, which it can read but not change
 RUNNER_HOME=/var/lib/gleipnir/runner
+BROWSERS_HOME=/var/lib/gleipnir/browsers   # the user that downloads Playwright's browsers
 
 log()  { echo "    $*"; }
 warn() { echo "    WARNING: $*" >&2; }

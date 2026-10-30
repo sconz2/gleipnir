@@ -72,10 +72,11 @@ echo "Gleipnir self-test"
 # --- Users ---------------------------------------------------------------------------------
 section "Users"
 should "sudo works for the checks below (sudo -u claude true)" sudo -u claude true
-for user in dev claude runner; do
+for user in dev claude runner browsers; do
   should "$user exists" id "$user"
   shouldnt "$user isn't an admin (sudo, admin, wheel)" bash -c "id -nG $user | grep -qwE 'sudo|admin|wheel'"
   should "$user has no sudo rights" bash -c "sudo -l -U $user | grep -q 'is not allowed to run sudo'"
+  shouldnt "$user has no usable password" bash -c "passwd -S $user | awk '\$2 == \"P\" { found = 1 } END { exit !found }'"
 done
 shouldnt "dev isn't in the project group" bash -c "id -nG dev | grep -qw project"
 should "claude and runner are in the project group" bash -c "id -nG claude | grep -qw project && id -nG runner | grep -qw project"
@@ -93,12 +94,19 @@ done < /etc/passwd
 if id vagrant >/dev/null 2>&1; then
   should "no account that can use sudo has a password (anyone could try it with su)${open_accounts:+:$open_accounts}" test -z "$open_accounts"
 elif [ -n "$open_accounts" ]; then
-  echo "  note  these accounts can use sudo and have a password:$open_accounts (anyone in the machine can try it with su)"
+  echo "  note  these accounts can use sudo and have a password:$open_accounts (only admins can use su, but lock it if you can)"
 fi
+# su is for admins only: refused before a password is even asked for
+should "su is for root and the sudo group only (pam_wheel in /etc/pam.d/su)" \
+  bash -c "grep -Eq '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_wheel\.so' /etc/pam.d/su"
+for user in claude runner dev; do
+  refused "$user can't use su to become root" "permission denied" bash -c "echo | sudo -u $user timeout 5 su root -c true"
+done
+refused "claude can't use su to become dev" "permission denied" bash -c "echo | sudo -u claude timeout 5 su dev -c true"
 
 # --- Nothing runs outside a session --------------------------------------------------------
-section "Nothing of claude's or runner's runs outside their sessions"
-for user in claude runner; do
+section "Nothing of claude's, runner's or browsers' runs outside their sessions"
+for user in claude runner browsers; do
   should "$user can't use cron (in /etc/cron.deny)" grep -qx "$user" /etc/cron.deny
   shouldnt "$user has no crontab" test -e "/var/spool/cron/crontabs/$user"
   shouldnt "$user has no services kept running (linger off)" test -e "/var/lib/systemd/linger/$user"
@@ -106,6 +114,13 @@ done
 shouldnt "dev has no services kept running (linger off)" test -e /var/lib/systemd/linger/dev
 refused "claude can't turn linger on (polkit)" "$POLKIT_NO" sudo -u claude loginctl enable-linger claude
 loginctl disable-linger claude >/dev/null 2>&1 || true
+shouldnt "browsers has nothing running (it only works during provisioning)" pgrep -u browsers
+if [ -d /opt/playwright ]; then
+  should "Playwright's browsers are root's, all of them" test -z "$(find /opt/playwright ! -user root -print -quit)"
+  should "Playwright's browsers can't be changed by anyone else (nothing group- or world-writable)" \
+    test -z "$(find /opt/playwright ! -type l -perm /022 -print -quit)"
+  should "Playwright's browsers can be run by claude" bash -c "sudo -u claude find /opt/playwright -maxdepth 1 >/dev/null"
+fi
 should "Gjöll starts before logins, cron and the network at boot" \
   bash -c "systemctl show -p Before --value gjoll-firewall.service | grep -q systemd-user-sessions.service"
 

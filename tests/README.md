@@ -29,7 +29,7 @@ tests/vm/selftest.sh my-project --quick    # without Gjöll's network tests
 
 It checks that each user can do what it should and nothing more:
 
-- **Users:** none has `sudo`; the box's `vagrant` account is locked and SSH takes keys only; no account that can use `sudo` has a password; `claude` and `runner` can't use cron, linger or polkit, and Gjöll starts before logins at boot.
+- **Users:** none has `sudo` or a usable password; the box's `vagrant` account is locked and SSH takes keys only; no account that can use `sudo` has a password; `su` is for admins only; `claude`, `runner` and `browsers` can't use cron, linger or polkit; Playwright's browsers, if installed, are root's and nothing of `browsers` is running; and Gjöll starts before logins at boot.
 - **Your copy:** Claude and the dev servers can't see it. Git has no exceptions that would let `dev` work in Claude's copy.
 - **Claude's copy:** its `.git` is Claude's alone, and `dev`'s git refuses to run there. A hook and an `fsmonitor` setting planted in a repo of Claude's never run as `dev`.
 - **Settings:** Claude's managed settings, `CLAUDE.md` and `.npmrc` are root's, and npm's install scripts are off in Claude's environment.

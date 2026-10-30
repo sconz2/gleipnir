@@ -302,30 +302,30 @@ else
 fi
 systemctl reload dbus 2>/dev/null || true
 
-# --- Nothing of claude's or runner's runs outside their sessions -----------------------------
-# Code Claude runs could otherwise leave something to start at the next boot (a cron job, an
-# at job, or its own services kept running with "linger"), possibly before Gjöll is up.
+# --- Nothing of claude's, runner's or browsers' runs outside their sessions ------------------
+# Code any of them runs could otherwise leave something to start at the next boot (a cron
+# job, an at job, or its own services kept running with "linger"), possibly before Gjöll is up.
 for deny in /etc/cron.deny /etc/at.deny; do
   touch "$deny"
   chmod 0644 "$deny"
-  for user in claude runner; do
+  for user in claude runner browsers; do
     grep -qx "$user" "$deny" || echo "$user" >> "$deny"
   done
 done
-for user in claude runner; do
+for user in claude runner browsers; do
   crontab -r -u "$user" 2>/dev/null || true
   loginctl disable-linger "$user" 2>/dev/null || true
 done
 if command -v atq >/dev/null; then
-  atq | awk '$NF == "claude" || $NF == "runner" { print $1 }' | xargs -r atrm
+  atq | awk '$NF == "claude" || $NF == "runner" || $NF == "browsers" { print $1 }' | xargs -r atrm
 fi
-# polkit: nothing at all for claude or runner (services, linger, power and so on)
+# polkit: nothing at all for them (services, linger, power and so on)
 install -d -m 0755 /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/40-gleipnir-claude.rules <<'EOF'
-// Gleipnir: claude and runner may never be allowed anything through polkit: no services,
-// no linger (services of their own kept running, which would start at boot), no power.
+// Gleipnir: claude, runner and browsers may never be allowed anything through polkit: no
+// services, no linger (services of their own kept running, which would start at boot), no power.
 polkit.addRule(function (action, subject) {
-  if (subject.user === "claude" || subject.user === "runner") {
+  if (subject.user === "claude" || subject.user === "runner" || subject.user === "browsers") {
     return polkit.Result.NO;
   }
   return polkit.Result.NOT_HANDLED;
