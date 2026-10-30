@@ -44,6 +44,16 @@ refused() {
   fi
 }
 section()   { echo; echo "$1"; }
+# A setting from the machine's config:  cfg <dotted.key> <default>
+cfg() {
+  python3 -I - /etc/gleipnir/config.json "$1" "$2" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for part in sys.argv[2].split("."):
+    data = data.get(part) if isinstance(data, dict) else None
+print(sys.argv[3] if data is None else ("true" if data is True else "false" if data is False else data))
+PY
+}
 owner_mode() { stat -c '%U:%G %a' "$1" 2>/dev/null; }
 is() { [ "$1" = "$2" ]; }
 POLKIT_NO="access denied|interactive authentication required|not authorized|permission denied"
@@ -161,6 +171,26 @@ if [ "$NETWORK" = "allowlist" ]; then
 fi
 if [ "$QUICK" = no ]; then
   should "Gjöll's own tests pass (gjoll-firewall --verify)" /usr/local/sbin/gjoll-firewall --verify
+fi
+
+# --- The editor ------------------------------------------------------------------------------
+section "The editor"
+if [ "$(cfg editor.auth password)" = "password" ]; then
+  should "it asks for a password" bash -c "curl -s -o /dev/null -w '%{http_code} %{redirect_url}' http://127.0.0.1:8080/ | grep -q '^302 .*login'"
+  should "its password is root's only (600)" is "$(owner_mode /etc/gleipnir/editor-password)" "root:root 600"
+  refused "claude can't read its password" "permission denied" sudo -u claude cat /home/dev/.config/code-server/config.yaml
+else
+  echo "  note  it has no password (editor.auth is \"none\")"
+fi
+
+# --- The database ----------------------------------------------------------------------------
+if [ "$(cfg postgres.enabled false)" = "true" ]; then
+  section "The database"
+  db_user="$(cfg postgres.user app)"
+  role="$(runuser -u postgres -- psql -tAq -c "select rolsuper, rolcreaterole, rolcreatedb from pg_roles where rolname = '$db_user'" 2>/dev/null)"
+  should "$db_user isn't a superuser, and can't make roles" is "${role%|*}" "f|f"
+  if [ "$(cfg postgres.createdb true)" = "true" ]; then want=t; else want=f; fi
+  should "$db_user can make databases only if postgres.createdb says so" is "${role##*|}" "$want"
 fi
 
 # --- Dev servers ---------------------------------------------------------------------------------

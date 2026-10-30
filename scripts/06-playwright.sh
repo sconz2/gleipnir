@@ -72,8 +72,8 @@ print(version())
 PY
 )" || VERSION=""
 if [ -z "$VERSION" ]; then
-  VERSION=latest
-  warn "The project doesn't use Playwright yet; installing browsers for the latest version. Provision again after adding it."
+  VERSION="$PLAYWRIGHT_DEFAULT_VERSION"
+  warn "The project doesn't use Playwright yet; installing browsers for Playwright $VERSION (scripts/versions.sh). Provision again after adding it."
 elif ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
   fail "Unexpected Playwright version in the project: $VERSION"
 fi

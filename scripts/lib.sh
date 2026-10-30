@@ -2,6 +2,8 @@
 # Gleipnir: shared helpers. Sourced by each step, not run on its own.
 
 GLEIPNIR_CONFIG="${GLEIPNIR_CONFIG:-/etc/gleipnir/config.json}"
+# The versions Gleipnir installs, and their checksums
+source "$GLEIPNIR_SRC/scripts/versions.sh"
 
 # Where things live in the machine
 TRUSTED=/srv/project            # your copy of the project: dev's, which Claude can't change
@@ -55,4 +57,28 @@ app_dir() {
   resolved="$(realpath -e -- "$WORK/$1" 2>/dev/null)" || return 1
   [ "$resolved" = "$wanted" ] && [ -d "$resolved" ] || return 1
   printf '%s\n' "$resolved"
+}
+
+# Download a signing key and keep only the key with this fingerprint (with its subkeys), as a
+# keyring apt can use. Anything else in the download, such as a second key added by whoever
+# changed the file, is left out; if the key isn't in it at all, provisioning stops.
+#   trusted_key <url> <fingerprint> <keyring.gpg>
+trusted_key() {
+  local url="$1" fpr="$2" out="$3" home
+  home="$(mktemp -d)"
+  if ! curl -fsSL "$url" -o "$home/download"; then
+    rm -rf "$home"
+    fail "couldn't download the signing key from $url"
+  fi
+  if ! GNUPGHOME="$home" gpg --batch --quiet --import "$home/download" 2>/dev/null \
+      || ! GNUPGHOME="$home" gpg --batch --with-colons --list-keys "$fpr" 2>/dev/null | grep -q "^fpr:*$fpr:"; then
+    GNUPGHOME="$home" gpgconf --kill all 2>/dev/null || true
+    rm -rf "$home"
+    fail "the signing key from $url doesn't have the expected fingerprint ($fpr); stopping"
+  fi
+  GNUPGHOME="$home" gpg --batch --export "$fpr" > "$home/keyring"
+  GNUPGHOME="$home" gpgconf --kill all 2>/dev/null || true
+  install -d -m 0755 "$(dirname "$out")"
+  install -m 0644 "$home/keyring" "$out"
+  rm -rf "$home"
 }

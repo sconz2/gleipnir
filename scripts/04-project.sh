@@ -85,7 +85,7 @@ sudo -u claude -H git config --global --unset-all safe.directory 2>/dev/null || 
 # --- The helpers ------------------------------------------------------------------------
 install -d -m 0755 /usr/local/lib/gleipnir
 install -m 0755 "$FILES/gleipnir-apps" /usr/local/lib/gleipnir/gleipnir-apps
-for helper in gleipnir-env gleipnir-context gleipnir-sync gleipnir-review; do
+for helper in gleipnir-env gleipnir-context gleipnir-sync gleipnir-review gleipnir-backup; do
   install -m 0755 "$FILES/$helper" "/usr/local/sbin/$helper"
 done
 

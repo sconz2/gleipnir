@@ -37,22 +37,21 @@ apt-get install -y --no-install-recommends "${packages[@]}" >/dev/null \
 # This version is the one `php` runs, even if another was installed before
 update-alternatives --set php "/usr/bin/php$PHP_VERSION" >/dev/null
 
-# --- Composer, from its own site, checked against its published signature --------------
+# --- Composer: the version in scripts/versions.sh, checked against its checksum ----------
 # In a throwaway home folder, so nothing is left in root's
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 export COMPOSER_HOME="$work" COMPOSER_ALLOW_SUPERUSER=1
-if [ -x /usr/local/bin/composer ]; then
-  /usr/local/bin/composer self-update --2 --no-interaction --quiet || warn "Composer couldn't update itself; keeping the version installed"
-else
-  log "Installing Composer"
-  expected="$(curl -fsSL https://composer.github.io/installer.sig)"
-  curl -fsSL https://getcomposer.org/installer -o "$work/composer-setup.php"
-  actual="$(php -r 'echo hash_file("sha384", $argv[1]);' "$work/composer-setup.php")"
-  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
-    fail "Composer's installer didn't match its signature; stopping"
+current="$(/usr/local/bin/composer --version --no-ansi 2>/dev/null | awk '/^Composer version/ { print $3 }' || true)"
+if [ "$current" != "$COMPOSER_VERSION" ]; then
+  log "Installing Composer $COMPOSER_VERSION"
+  curl -fsSL -o "$work/composer.phar" \
+    "https://github.com/composer/composer/releases/download/$COMPOSER_VERSION/composer.phar" \
+    || fail "couldn't download Composer $COMPOSER_VERSION"
+  if [ "$(sha256sum "$work/composer.phar" | cut -d' ' -f1)" != "$COMPOSER_SHA256" ]; then
+    fail "Composer's download didn't match its checksum in scripts/versions.sh; stopping"
   fi
-  php "$work/composer-setup.php" --quiet --install-dir=/usr/local/bin --filename=composer
+  install -o root -g root -m 0755 "$work/composer.phar" /usr/local/bin/composer
 fi
 chown root:root /usr/local/bin/composer
 chmod 0755 /usr/local/bin/composer

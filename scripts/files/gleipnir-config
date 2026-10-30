@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Gleipnir: check a machine's config before anything is installed. Every setting is
+checked: its name (a typo is an error, not ignored), its type and its range. All the
+problems are listed at once.
+
+  python3 scripts/files/gleipnir-config machines/my-project.json
+
+install.sh runs it first, so a mistake stops provisioning before it changes anything. It
+needs only Python 3, so you can also run it on your computer before vagrant up.
+Keys starting with "_" are ignored, so you can use them for comments.
+"""
+import difflib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+
+sys.dont_write_bytecode = True
+
+# Every setting, by section. None: a value (checked below); a dict: a section of its own.
+SCHEMA = {
+    "name": None,  # from before machines were named by their file; ignored
+    "repo": None, "deploy_key": None, "env_file": None, "env_dir": None,
+    "claude_file": None, "context_dir": None, "node": None, "apps": None, "extensions": None,
+    "git": {"name": None, "email": None},
+    "vm": {"memory": None, "cpus": None},
+    "ports": {"editor": None, "app": None, "db": None},
+    "php": {"enabled": None, "version": None, "extensions": None},
+    "devserver": {"enabled": None, "command": None},
+    "playwright": {"enabled": None, "browsers": None},
+    "postgres": {"enabled": None, "version": None, "user": None, "password": None,
+                 "databases": None, "createdb": None},
+    "claude": {"network": None, "allowed_domains": None, "wip_branch": None,
+               "autocommit": None, "checks": None},
+    "runner": {"allowed_domains": None},
+    "editor": {"auth": None},
+}
+APP_KEYS = {"port": None, "path": None, "devserver": {"enabled": None, "command": None}}
+
+IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+# Database names are quoted wherever they're used, so a dash is fine; never first, though,
+# where a command could take the name for an option
+DATABASE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$")
+SITE = re.compile(r"^(\*\.|\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?$")
+# publisher.name, optionally @version
+EXTENSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*(@[0-9][0-9A-Za-z.+-]*)?$")
+BROWSERS = {"chromium", "firefox", "webkit", "chrome", "msedge"}
+
+
+class Checker:
+    def __init__(self, config):
+        self.config = config
+        self.problems = []
+
+    def problem(self, where, message):
+        self.problems.append(f"{where}: {message}")
+
+    def get(self, *keys):
+        value = self.config
+        for key in keys:
+            if not isinstance(value, dict) or key not in value:
+                return None
+            value = value[key]
+        return value
+
+    # --- Names: a setting Gleipnir doesn't know is most likely a typo ---------------------
+    def names(self, value, schema, where):
+        if not isinstance(value, dict):
+            self.problem(where or "the config", "must be an object ({...})")
+            return
+        for key, inner in value.items():
+            if key.startswith("_"):
+                continue
+            path = f"{where}.{key}" if where else key
+            if key not in schema:
+                close = difflib.get_close_matches(key, list(schema), n=1)
+                hint = f' (did you mean "{close[0]}"?)' if close else ""
+                self.problem(path, f"isn't a setting Gleipnir knows{hint}")
+            elif isinstance(schema[key], dict):
+                self.names(inner, schema[key], path)
+
+    # --- Values --------------------------------------------------------------------------------
+    def kind(self, where, value, expected, label):
+        if value is None:
+            return False
+        ok = isinstance(value, expected) and not (expected is int and isinstance(value, bool))
+        if not ok:
+            self.problem(where, f"must be {label}")
+        return ok
+
+    def boolean(self, where, value):
+        self.kind(where, value, bool, "true or false (not in quotes)")
+
+    def text(self, where, value, one_line=True):
+        if self.kind(where, value, str, "text, in quotes") and one_line and any(c in value for c in "\n\r\t\0"):
+            self.problem(where, "must be one line of text")
+
+    def number(self, where, value, low, high):
+        if self.kind(where, value, int, f"a whole number from {low} to {high} (not in quotes)"):
+            if not low <= value <= high:
+                self.problem(where, f"must be from {low} to {high}")
+
+    def text_list(self, where, value, item_check):
+        if not self.kind(where, value, list, "a list, like [\"a\", \"b\"]"):
+            return
+        for item in value:
+            if not isinstance(item, str):
+                self.problem(where, f"{item!r} must be text, in quotes")
+            else:
+                item_check(item)
+
+    def check(self):
+        c, get = self.config, self.get
+        if not isinstance(c, dict):
+            self.problem("the config", "must be an object ({...})")
+            return self.problems
+        self.names(c, SCHEMA, "")
+
+        repo = get("repo")
+        if not isinstance(repo, str) or not repo.strip():
+            self.problem("repo", "is required: the project's git URL, like git@github.com:you/project.git")
+        elif re.search(r"\s", repo) or repo.startswith("-"):
+            self.problem("repo", "must be a git URL, with no spaces")
+        for key in ("deploy_key", "env_file", "env_dir", "claude_file", "context_dir"):
+            self.text(key, get(key))
+
+        self.text("git.name", get("git", "name"))
+        email = get("git", "email")
+        self.text("git.email", email)
+        if isinstance(email, str) and "@" not in email:
+            self.problem("git.email", "must be an email address")
+
+        self.number("vm.memory", get("vm", "memory"), 1024, 65536)
+        self.number("vm.cpus", get("vm", "cpus"), 1, 64)
+        for key in ("editor", "app", "db"):
+            self.number(f"ports.{key}", get("ports", key), 1, 65535)
+
+        node = get("node")
+        if node is not None:
+            if isinstance(node, str) and node.isdigit():
+                node = int(node)
+            self.number("node", node, 18, 99)
+
+        self.boolean("php.enabled", get("php", "enabled"))
+        version = get("php", "version")
+        if version is not None:
+            if isinstance(version, float):
+                version = str(version)
+            if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+", version):
+                self.problem("php.version", 'must be a version like "8.4"')
+        self.text_list("php.extensions", get("php", "extensions"),
+                       lambda e: re.fullmatch(r"[a-z0-9_]+", e) or self.problem("php.extensions", f'"{e}" isn\'t an extension name, like "redis"'))
+
+        self.boolean("devserver.enabled", get("devserver", "enabled"))
+        self.text("devserver.command", get("devserver", "command"))
+
+        self.boolean("playwright.enabled", get("playwright", "enabled"))
+        self.text_list("playwright.browsers", get("playwright", "browsers"),
+                       lambda b: b in BROWSERS or self.problem("playwright.browsers", f'"{b}" isn\'t one of {", ".join(sorted(BROWSERS))}'))
+
+        self.text_list("extensions", get("extensions"),
+                       lambda e: EXTENSION.match(e) or self.problem("extensions", f'"{e}" isn\'t an extension ID, like "esbenp.prettier-vscode"'))
+
+        self.postgres()
+
+        network = get("claude", "network")
+        if network is not None and network not in ("allowlist", "open"):
+            self.problem("claude.network", 'must be "allowlist" or "open"')
+        for key in ("wip_branch", "autocommit", "checks"):
+            self.boolean(f"claude.{key}", get("claude", key))
+        for where, value in (("claude.allowed_domains", get("claude", "allowed_domains")),
+                             ("runner.allowed_domains", get("runner", "allowed_domains"))):
+            self.text_list(where, value, lambda s, where=where: SITE.match(s.strip().lower()) or self.problem(
+                where, f'"{s}" isn\'t a site name (use e.g. docs.example.com or .example.com)'))
+
+        auth = get("editor", "auth")
+        if auth is not None and auth not in ("password", "none"):
+            self.problem("editor.auth", 'must be "password" or "none"')
+
+        self.apps()
+        return self.problems
+
+    def postgres(self):
+        get = self.get
+        enabled = get("postgres", "enabled")
+        self.boolean("postgres.enabled", enabled)
+        # 15 or later: provisioning sets the user's password with psql's \getenv, new in 15
+        version = get("postgres", "version")
+        if isinstance(version, str) and version.isdigit():
+            version = int(version)
+        self.number("postgres.version", version, 15, 30)
+        self.boolean("postgres.createdb", get("postgres", "createdb"))
+        user = get("postgres", "user")
+        if self.kind("postgres.user", user, str, "text, in quotes"):
+            if not IDENTIFIER.match(user) or user in ("postgres", "root"):
+                self.problem("postgres.user", "must be a lowercase name like \"app\" (letters, digits, _), not postgres")
+        password = get("postgres", "password")
+        self.text("postgres.password", password)
+        if enabled is True and not (isinstance(password, str) and password):
+            self.problem("postgres.password", "is required when PostgreSQL is enabled")
+        databases = get("postgres", "databases")
+        if self.kind("postgres.databases", databases, list, 'a list, like ["my_project"]'):
+            if len(databases) > 50:
+                self.problem("postgres.databases", "can list at most 50 databases")
+            for db in databases:
+                if not isinstance(db, str) or not DATABASE.match(db) or db in ("postgres", "template0", "template1"):
+                    self.problem("postgres.databases", f"{db!r} must be a name like \"my_project\" (letters, digits, _ and -, not starting with -)")
+
+    def apps(self):
+        apps = self.get("apps")
+        if isinstance(apps, dict):
+            for name, app in apps.items():
+                if isinstance(app, dict) and not name.startswith("_"):
+                    self.names(app, APP_KEYS, f"apps.{name}")
+        try:
+            load_apps().app_rows(self.config)
+        except Exception as error:  # the apps checker's own message
+            self.problem("apps", str(error))
+
+
+def load_apps():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gleipnir-apps")
+    loader = importlib.machinery.SourceFileLoader("gleipnir_apps", path)
+    spec = importlib.util.spec_from_loader("gleipnir_apps", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def main(argv):
+    if len(argv) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    try:
+        with open(argv[1]) as fh:
+            config = json.load(fh)
+    except OSError as error:
+        print(f"Gleipnir: can't read {argv[1]}: {error.strerror}", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"Gleipnir: {argv[1]} isn't valid JSON: {error}", file=sys.stderr)
+        return 1
+    problems = Checker(config).check()
+    if problems:
+        print(f"Gleipnir: the config has {len(problems)} problem(s); nothing was changed:", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

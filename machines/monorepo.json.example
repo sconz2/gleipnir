@@ -16,12 +16,15 @@
     "version": 18,
     "user": "app",
     "password": "change-me",
-    "databases": ["my_project"]
+    "databases": ["my_project"],
+    "createdb": true
   },
   "claude": {
     "network": "allowlist",
     "allowed_domains": [],
     "wip_branch": true,
     "checks": true
-  }
+  },
+  "runner": { "allowed_domains": [] },
+  "editor": { "auth": "password" }
 }

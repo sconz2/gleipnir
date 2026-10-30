@@ -1,6 +1,7 @@
 #!/bin/sh
-# Gleipnir: adds the shortcuts gup, gprov, genv, gctx, gssh, greview, ghalt and gdestroy to your
-# shell's startup file, or updates them if they're already there. They work from any folder.
+# Gleipnir: adds the shortcuts gup, gprov, genv, gctx, gssh, greview, gpass, gbackup, grestore,
+# ghalt and gdestroy to your shell's startup file, or updates them if they're already there.
+# They work from any folder.
 #
 #   ./install-shortcuts                     add them (or update them) for your shell:
 #                                           ~/.zshrc for zsh, ~/.bash_profile for bash
@@ -56,7 +57,7 @@ awk -v s="$START" -v e="$END" '$0 == s { skip = 1; next } $0 == e { skip = 0; ne
 if [ "$MODE" = install ]; then
   # The same names defined elsewhere in the file (e.g. older aliases) would clash: zsh
   # expands an alias even in a function definition, which breaks every new terminal
-  clashes="$(grep -nE '^[[:space:]]*(alias[[:space:]]+|function[[:space:]]+)?(gup|gprov|genv|gctx|gssh|greview|ghalt|gdestroy)[[:space:]]*(=|\(\)|\{)' "$tmp" || true)"
+  clashes="$(grep -nE '^[[:space:]]*(alias[[:space:]]+|function[[:space:]]+)?(gup|gprov|genv|gctx|gssh|greview|gpass|gbackup|grestore|ghalt|gdestroy)[[:space:]]*(=|\(\)|\{)' "$tmp" || true)"
   if [ -n "$clashes" ]; then
     echo "install-shortcuts: $RC already defines some of these names. Remove these lines, then run it again:" >&2
     printf '%s\n' "$clashes" | sed 's/^/  line /' >&2
@@ -74,7 +75,7 @@ if [ "$MODE" = install ]; then
     cat <<'EOF'
 # Older aliases with these names, from anywhere, would replace the shortcuts; and the
 # "function" keyword stops an alias name being expanded in the definitions themselves
-unalias gup gprov genv gctx gssh greview ghalt gdestroy 2>/dev/null
+unalias gup gprov genv gctx gssh greview gpass gbackup grestore ghalt gdestroy 2>/dev/null
 function _gleipnir_need { [ -n "${2:-}" ] || { echo "usage: $1 <machine>" >&2; return 2; }; }
 # Start or fully provision a machine, saving the output to logs/ in the Gleipnir folder
 function gup   { _gleipnir_need gup "${1:-}" && ( set -o pipefail; cd "$GLEIPNIR_DIR" && mkdir -p logs && vagrant up "$1" --no-color 2>&1 | tee "logs/$1-$(date +%F-%H%M%S).log" ); }
@@ -86,6 +87,63 @@ function gctx  { _gleipnir_need gctx "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant
 function gssh  { _gleipnir_need gssh "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant ssh "$1" ); }
 # Bring Claude's branch (or one you name) into your copy of the project, for review
 function greview { _gleipnir_need greview "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant ssh "$1" -c "sudo gleipnir-review${2:+ $(printf '%q' "$2")}" ); }
+# The editor's password (copied to the clipboard too, on a Mac)
+function gpass {
+  _gleipnir_need gpass "${1:-}" || return
+  local pass
+  pass="$(cd "$GLEIPNIR_DIR" && vagrant ssh "$1" --no-tty -c "sudo cat /etc/gleipnir/editor-password" 2>/dev/null | tr -d '\r')"
+  [ -n "$pass" ] || { echo "gpass: no password found; is the editor's password on (editor.auth)?" >&2; return 1; }
+  echo "$pass"
+  if command -v pbcopy >/dev/null; then printf '%s' "$pass" | pbcopy && echo "(copied to the clipboard)"; fi
+}
+# Back up what lives only in the machine (both copies of the project, the databases),
+# encrypted, to backups/ in the Gleipnir folder; or restore one
+function gbackup {
+  _gleipnir_need gbackup "${1:-}" || return
+  ( set -e
+    cd "$GLEIPNIR_DIR"
+    mkdir -p backups && chmod 700 backups
+    file="backups/$1-$(date +%Y%m%d-%H%M%S).gleipnir"
+    remote="/home/vagrant/gleipnir-backup-$$"
+    printf 'A passphrase for this backup (at least 12 characters; it can'"'"'t be recovered): '
+    read -rs pass; echo
+    printf 'The same again: '
+    read -rs again; echo
+    [ "$pass" = "$again" ] || { echo "gbackup: they didn't match" >&2; exit 1; }
+    config="$(mktemp)"
+    vagrant ssh-config "$1" > "$config" || { rm -f "$config"; exit 1; }
+    # The copy in the machine is removed whatever happens, and a part-copied file here too
+    ok=no
+    if printf '%s\n' "$pass" | vagrant ssh "$1" --no-tty -c "sudo gleipnir-backup create $remote" \
+        && scp -q -F "$config" "$1:$remote" "$file.part"; then
+      chmod 600 "$file.part" && mv "$file.part" "$file" && ok=yes
+    fi
+    vagrant ssh "$1" -c "rm -f $remote" >/dev/null 2>&1 || true
+    rm -f "$config" "$file.part"
+    [ "$ok" = yes ] || { echo "gbackup: the backup wasn't saved" >&2; exit 1; }
+    echo "Saved $file"
+  )
+}
+function grestore {
+  [ -n "${1:-}" ] && [ -f "${2:-}" ] || { echo "usage: grestore <machine> <backup file>" >&2; return 2; }
+  ( set -e
+    file="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+    cd "$GLEIPNIR_DIR"
+    remote="/home/vagrant/gleipnir-restore-$$"
+    printf 'The backup'"'"'s passphrase: '
+    read -rs pass; echo
+    config="$(mktemp)"
+    vagrant ssh-config "$1" > "$config" || { rm -f "$config"; exit 1; }
+    result=1
+    if scp -q -F "$config" "$file" "$1:$remote"; then
+      result=0
+      printf '%s\n' "$pass" | vagrant ssh "$1" --no-tty -c "sudo gleipnir-backup restore $remote" || result=$?
+    fi
+    vagrant ssh "$1" -c "rm -f $remote" >/dev/null 2>&1 || true
+    rm -f "$config"
+    exit "$result"
+  )
+}
 function ghalt { _gleipnir_need ghalt "${1:-}" && ( cd "$GLEIPNIR_DIR" && vagrant halt "$1" ); }
 # Delete a machine. Vagrant still asks you to confirm.
 function gdestroy {
@@ -102,7 +160,7 @@ fi
 cat "$tmp" > "$RC"
 
 if [ "$MODE" = install ]; then
-  echo "Gleipnir shortcuts added to $RC (gup, gprov, genv, gctx, gssh, greview, ghalt, gdestroy), for the folder $DIR"
+  echo "Gleipnir shortcuts added to $RC (gup, gprov, genv, gctx, gssh, greview, gpass, gbackup, grestore, ghalt, gdestroy), for the folder $DIR"
   echo "Open a new terminal, or run: source $RC"
 else
   echo "Gleipnir shortcuts removed from $RC"

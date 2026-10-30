@@ -15,6 +15,7 @@ With "apps", each one has its own folder and port:
 "path" defaults to the app's name. The port is the same inside the machine and on
 your computer. The top-level "devserver.enabled" turns every dev server on or off;
 an app's own "devserver.enabled" and "devserver.command" apply to that app only.
+Names starting with "_" are comments, and skipped.
 """
 import json
 import re
@@ -26,15 +27,18 @@ PART = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 RESERVED = {22, 3128, 3129, 3138, 3139, 5432, 8080}
 
 
+class AppsError(Exception):
+    pass
+
+
 def fail(message):
-    sys.exit(f"apps: {message}")
+    raise AppsError(message)
 
 
-def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "/etc/gleipnir/config.json"
-    with open(path) as fh:
-        config = json.load(fh)
-
+def app_rows(config):
+    """Each app as [name, folder, port, devserver, command]. AppsError if anything's wrong.
+    (gleipnir-config uses this too, to check the whole config before provisioning.)"""
+    rows = []
     top = config.get("devserver") or {}
     if not isinstance(top, dict):
         fail('"devserver" must be an object, e.g. {"enabled": true}')
@@ -45,8 +49,9 @@ def main():
         command = top.get("command") or ""
         if not isinstance(command, str) or "\t" in command or "\n" in command:
             fail("devserver.command must be one line of text")
-        print("\t".join(["app", ".", "5173", "true" if top_enabled else "false", command]))
-        return
+        return [["app", ".", "5173", "true" if top_enabled else "false", command]]
+    if isinstance(apps, dict):  # keys starting with "_" are comments
+        apps = {name: app for name, app in apps.items() if not name.startswith("_")}
     if not isinstance(apps, dict) or not apps:
         fail('"apps" must be an object with at least one app, e.g. {"frontend": {"port": 5175}}')
 
@@ -80,7 +85,20 @@ def main():
         command = own.get("command") or ""
         if not isinstance(command, str) or "\t" in command or "\n" in command:
             fail(f'"{name}": devserver.command must be one line of text')
-        print("\t".join([name, folder, str(port), "true" if enabled else "false", command]))
+        rows.append([name, folder, str(port), "true" if enabled else "false", command])
+    return rows
+
+
+def main():
+    path = sys.argv[1] if len(sys.argv) > 1 else "/etc/gleipnir/config.json"
+    with open(path) as fh:
+        config = json.load(fh)
+    try:
+        rows = app_rows(config)
+    except AppsError as error:
+        sys.exit(f"apps: {error}")
+    for row in rows:
+        print("\t".join(row))
 
 
 if __name__ == "__main__":

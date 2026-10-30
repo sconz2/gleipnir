@@ -15,6 +15,9 @@
 # Provisioning logs from the gup and gprov shortcuts: they include your machine's details
 /logs/
 
+# Backups from the gbackup shortcut: encrypted, but yours alone
+/backups/
+
 .DS_Store
 # Python caches, from running the tests
 __pycache__/

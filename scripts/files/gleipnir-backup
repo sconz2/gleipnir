@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# Gleipnir: back up what lives only in this machine, encrypted, or restore it.
+#
+#   sudo gleipnir-backup create <file>    reads a passphrase from the first line of input
+#   sudo gleipnir-backup restore <file>   the same passphrase, the same way
+#
+# The gbackup and grestore shortcuts run these for you from your computer, and keep the
+# backups in backups/ in the Gleipnir folder.
+#
+# A backup holds:
+#   your copy of the project      every branch, including ones you haven't pushed
+#   Claude's copy                 every branch, and its uncommitted work as one commit
+#                                 (files .gitignore leaves out, like .env and node_modules, aren't in it)
+#   the databases                 each one in postgres.databases, as a pg_dump
+# Not in it: the .env files, the config and the context folder (they're on your computer),
+# and Claude's login (log in again).
+#
+# Restoring never overwrites anything: your branches arrive in your copy as backup/<name>,
+# Claude's in its copy as backup/<name> (with backup/worktree for its uncommitted work), and
+# a database is only filled if it has no tables yet.
+#
+# What's in a database came from the app (and so possibly from Claude), so it's dumped and
+# restored as the app's own database user, never as PostgreSQL's superuser. Nothing is ever
+# readable by claude or runner on the way, and the backup is unpacked as an unprivileged user.
+set -euo pipefail
+
+TRUSTED=/srv/project
+WORK=/srv/work
+CONFIG=/etc/gleipnir/config.json
+CIPHER=(-aes-256-cbc -pbkdf2 -iter 600000 -md sha256)
+
+[ "$(id -u)" -eq 0 ] || { echo "gleipnir-backup: run it with sudo" >&2; exit 1; }
+mode="${1:-}"
+file="${2:-}"
+case "$mode" in
+  create|restore) [ -n "$file" ] || { echo "usage: gleipnir-backup create|restore <file>" >&2; exit 2; } ;;
+  *) echo "usage: gleipnir-backup create|restore <file>" >&2; exit 2 ;;
+esac
+
+IFS= read -r passphrase || true
+if [ "${#passphrase}" -lt 12 ]; then
+  echo "Gleipnir: the passphrase must be at least 12 characters" >&2
+  exit 1
+fi
+
+say() { echo "Gleipnir: $*"; }
+warn() { echo "Gleipnir: WARNING: $*" >&2; }
+cfg() { # dotted.key [default]: one value per line
+  python3 -I - "$CONFIG" "$1" "${2-}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for part in sys.argv[2].split("."):
+    data = data.get(part) if isinstance(data, dict) else None
+if data is None:
+    print(sys.argv[3])
+elif isinstance(data, list):
+    print("\n".join(str(item) for item in data))
+elif isinstance(data, bool):
+    print("true" if data else "false")
+else:
+    print(data)
+PY
+}
+
+# pg_dump and pg_restore as the app's database user, over the network to localhost, run as
+# an unprivileged user. The password reaches them through the environment, never a command line.
+as_app_db() { # command args...
+  PGPASSWORD="$(cfg postgres.password)" runuser -u nobody -- "$@" -h 127.0.0.1 -U "$(cfg postgres.user app)"
+}
+
+umask 077
+cd /
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+chmod 0700 "$stage"
+
+# --- Create ------------------------------------------------------------------------------------
+# Everything is written by root into root's own folder; nothing in it is readable by anyone else.
+create() {
+  local out="$stage/backup" db snapshot
+  mkdir -m 0700 "$out"
+  echo "Gleipnir backup of $(hostname), $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$out/about.txt"
+
+  # Your copy: every branch and remote branch
+  if [ -n "$(sudo -u dev -H git -C "$TRUSTED" for-each-ref --count=1 --format=x refs/heads/)" ]; then
+    # shellcheck disable=SC2024  # root writing the file is the point
+    sudo -u dev -H git -C "$TRUSTED" bundle create --quiet - --all > "$out/yours.bundle"
+    echo "your copy: $(sudo -u dev -H git -C "$TRUSTED" for-each-ref --format=x refs/heads/ | wc -l) branch(es)" >> "$out/about.txt"
+  fi
+
+  # Claude's copy: every branch, and its working files as one commit, made with a separate
+  # index so nothing in Claude's copy changes (bar a reference removed again straight away)
+  snapshot="$(sudo -u claude -H bash -s <<'SH'
+set -euo pipefail
+cd /srv/work
+git() { command git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
+index="$(mktemp)"
+trap 'rm -f "$index"' EXIT
+if git rev-parse --verify --quiet HEAD >/dev/null; then
+  GIT_INDEX_FILE="$index" git read-tree HEAD
+  parent=(-p HEAD)
+else
+  rm -f "$index"
+  parent=()
+fi
+GIT_INDEX_FILE="$index" git add -A
+tree="$(GIT_INDEX_FILE="$index" git write-tree)"
+commit="$(git -c user.name=Gleipnir -c user.email=gleipnir@localhost commit-tree --no-gpg-sign "$tree" "${parent[@]}" -m "Claude's uncommitted work, backed up by Gleipnir")"
+git update-ref refs/gleipnir/worktree "$commit"
+echo "$commit"
+SH
+)"
+  # shellcheck disable=SC2024  # root writing the file is the point
+  sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+    bundle create --quiet - --branches refs/gleipnir/worktree > "$out/claude.bundle"
+  sudo -u claude -H git -C "$WORK" update-ref -d refs/gleipnir/worktree
+  echo "Claude's copy: $(sudo -u claude -H git -C "$WORK" for-each-ref --format=x refs/heads/ | wc -l) branch(es), and its uncommitted work (${snapshot:0:12})" >> "$out/about.txt"
+
+  # The databases, dumped as the app's own user
+  if [ "$(cfg postgres.enabled false)" = "true" ]; then
+    while IFS= read -r db; do
+      [ -n "$db" ] || continue
+      if as_app_db pg_dump -Fc -d "$db" > "$out/db-$db.dump" 2>"$stage/pg.err"; then
+        echo "database: $db" >> "$out/about.txt"
+      else
+        rm -f "$out/db-$db.dump"
+        warn "couldn't back up the database $db: $(head -n 1 "$stage/pg.err")"
+      fi
+    done < <(cfg postgres.databases)
+  fi
+
+  # A checksum of each part, so a damaged backup is noticed before anything is restored
+  ( cd "$out" && sha256sum -- * > SHA256SUMS )
+
+  # Packed and encrypted. The passphrase reaches openssl through a file descriptor, never a
+  # command line other users could see.
+  rm -f "$file.new"
+  if ! tar -C "$out" -cf - . | openssl enc -e "${CIPHER[@]}" -salt -pass fd:3 -out "$file.new" 3<<<"$passphrase"; then
+    rm -f "$file.new"
+    say "couldn't write the backup" >&2
+    exit 1
+  fi
+  chmod 0600 "$file.new"
+  if [ -n "${SUDO_USER:-}" ]; then chown "$SUDO_USER" "$file.new"; fi
+  mv "$file.new" "$file"
+  sed 's/^/  /' "$out/about.txt"
+}
+
+# --- Restore -----------------------------------------------------------------------------------
+restore() {
+  local in="$stage/backup" db dump tables failed=0 name listed sum
+  # Unpacked as nobody, into a folder of nobody's: whatever the archive holds, it can't write
+  # anywhere else. Then only plain files with the expected names are used.
+  chmod 0711 "$stage"
+  install -d -o nobody -g nogroup -m 0700 "$in"
+  if ! openssl enc -d "${CIPHER[@]}" -pass fd:3 -in "$file" 3<<<"$passphrase" 2>/dev/null \
+      | runuser -u nobody -- tar -C "$in" -xf - --no-same-owner --no-same-permissions 2>/dev/null; then
+    say "couldn't open the backup: wrong passphrase, or not a Gleipnir backup" >&2
+    exit 1
+  fi
+  chown -R root:root "$in"
+  chmod 0700 "$in"
+  if [ -n "$(find "$in" -mindepth 1 \( ! -type f -o -links +1 \) -print -quit)" ]; then
+    say "the backup holds something other than plain files; nothing was restored" >&2
+    exit 1
+  fi
+  for name in "$in"/*; do
+    case "$(basename "$name")" in
+      about.txt|SHA256SUMS|yours.bundle|claude.bundle|db-*.dump) ;;
+      *) say "the backup holds a file Gleipnir didn't put there ($(basename "$name")); nothing was restored" >&2; exit 1 ;;
+    esac
+  done
+  # Every part must be in the checksums, and the checksums must name only those parts. The
+  # encryption itself doesn't notice changes (aes-256-cbc has no MAC); these checksums,
+  # inside the encryption, do.
+  listed="$(cd "$in" && find . -mindepth 1 -maxdepth 1 ! -name SHA256SUMS -printf '%f\n' | sort)"
+  if [ ! -f "$in/SHA256SUMS" ] \
+      || [ "$(while read -r sum name; do [[ "$sum" =~ ^[0-9a-f]{64}$ && "$name" != */* ]] && echo "$name"; done < "$in/SHA256SUMS" | sort)" != "$listed" ] \
+      || [ "$(wc -l < "$in/SHA256SUMS")" -ne "$(printf '%s\n' "$listed" | sed '/^$/d' | wc -l)" ] \
+      || ! ( cd "$in" && sha256sum --quiet --strict -c SHA256SUMS ); then
+    say "the backup is damaged (its checksums don't match); nothing was restored" >&2
+    exit 1
+  fi
+  sed 's/^/  /' "$in/about.txt" 2>/dev/null || true
+
+  # Each bundle goes to its user in a folder only they can read
+  hand_over() { # user bundle: prints its new path
+    local folder
+    folder="$(mktemp -d -p "$stage")"
+    chown "$1:$1" "$folder"
+    install -o "$1" -g "$1" -m 0600 "$2" "$folder/$(basename "$2")"
+    echo "$folder/$(basename "$2")"
+  }
+
+  if [ -f "$in/yours.bundle" ]; then
+    if sudo -u dev -H git -C "$TRUSTED" -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
+        fetch --quiet --no-tags --no-write-fetch-head "$(hand_over dev "$in/yours.bundle")" '+refs/heads/*:refs/remotes/backup/*'; then
+      say "your branches are in your copy as backup/<name> (git branch -a). To take one back, e.g.:"
+      say "  git log -p main..backup/main, then git merge --ff-only backup/main"
+    else
+      warn "your branches couldn't be restored"; failed=1
+    fi
+  fi
+  if [ -f "$in/claude.bundle" ]; then
+    if sudo -u claude -H git -C "$WORK" -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+        -c transfer.fsckObjects=true -c fetch.fsckObjects=true fetch --quiet --no-tags --no-write-fetch-head \
+        "$(hand_over claude "$in/claude.bundle")" '+refs/heads/*:refs/remotes/backup/*' '+refs/gleipnir/worktree:refs/remotes/backup/worktree'; then
+      say "Claude's branches are in its copy as backup/<name>, and its uncommitted work as backup/worktree."
+      say "  Ask Claude to bring back what it needs (e.g. git checkout backup/worktree -- .)."
+    else
+      warn "Claude's branches couldn't be restored"; failed=1
+    fi
+  fi
+
+  # Only the databases this machine's config lists, restored as the app's own user
+  for dump in "$in"/db-*.dump; do
+    [ -f "$dump" ] || continue
+    db="$(basename "$dump" .dump)"; db="${db#db-}"
+    if [ "$(cfg postgres.enabled false)" != "true" ] || ! cfg postgres.databases | grep -qxF -- "$db"; then
+      say "database $db: not in this machine's postgres.databases (add it and provision), skipped"
+      continue
+    fi
+    # Asked as the app's user too: the database and its settings are the app's, so nothing
+    # in it ever runs as PostgreSQL's superuser
+    tables="$(as_app_db psql -X -tAq -d "$db" -c \
+      "select count(*) from pg_tables where schemaname not in ('pg_catalog','information_schema')" 2>/dev/null || echo "?")"
+    if [ "$tables" != "0" ]; then
+      say "database $db: already has tables (or couldn't be read), so it was left as it is. To replace it:"
+      say "  sudo -u postgres dropdb $db, provision to make it again, then grestore again"
+      continue
+    fi
+    if as_app_db pg_restore --no-owner --no-privileges -d "$db" < "$dump" 2>"$stage/pg.err"; then
+      say "database $db: restored"
+    else
+      warn "database $db: restored with errors: $(head -n 1 "$stage/pg.err")"; failed=1
+    fi
+  done
+  return "$failed"
+}
+
+"$mode"

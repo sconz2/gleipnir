@@ -21,15 +21,16 @@ CONTEXT_IN="${5:-}"
 ENV_DIR_IN="${6:-}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
+# Check the whole config before anything else, so a mistake stops provisioning now, before
+# anything is changed (the machine keeps its last good config), rather than halfway
+python3 -I "$SRC/scripts/files/gleipnir-config" "$CONFIG_IN" || {
+  echo "Gleipnir: fix the machine's config (machines/<name>.json), then provision again." >&2
+  exit 1
+}
+
 # A root-only copy of the config: it can hold passwords
 install -d -m 0755 /etc/gleipnir
 install -m 0600 "$CONFIG_IN" /etc/gleipnir/config.json
-
-# Check the apps before anything else, so a mistake there fails now rather than halfway
-python3 -I "$SRC/scripts/files/gleipnir-apps" /etc/gleipnir/config.json >/dev/null || {
-  echo "Gleipnir: fix \"apps\" in the machine's config, then provision again." >&2
-  exit 1
-}
 
 # Ubuntu checks for services to restart after every package install and lists them each
 # time; the base step does that once, quietly, instead

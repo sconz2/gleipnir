@@ -13,8 +13,8 @@
 #                          for projects with "apps"), or "env_dir"
 #   claude/my-project.md   a starter CLAUDE.md for the project (optional; falls back to
 #                          claude/default.md), or "claude_file"
-#   context/my-project/    background files for Claude, copied to the project's
-#                          tmp/context (optional), or "context_dir"
+#   context/my-project/    background files for Claude, copied to /srv/context in the
+#                          machine (optional), or "context_dir"
 #
 # This file only creates the VMs and hands over to install.sh, which does the
 # real work and is the same entry point used on a VPS.
@@ -35,6 +35,10 @@ upload = '/home/vagrant/.gleipnir'
 
 # Taken inside the machine (SSH, the proxy, the database, the editor), so no app can use them
 reserved_ports = [22, 3128, 3129, 3138, 3139, 5432, 8080]
+
+# The base image's version, pinned with the other versions in scripts/versions.sh
+box_version = File.read(File.join(root, 'scripts', 'versions.sh'))[/^BOX_VERSION=(\S+)$/, 1]
+abort 'Gleipnir: scripts/versions.sh has no BOX_VERSION.' unless box_version
 
 # --- Read every machine config ------------------------------------------------
 machines = Dir.glob(File.join(root, 'machines', '*.json')).sort.map do |file|
@@ -102,6 +106,7 @@ machines = Dir.glob(File.join(root, 'machines', '*.json')).sort.map do |file|
   ports = settings['ports'] || {}
   abort "Gleipnir: #{where}: \"ports\" must be an object, e.g. {\"editor\": 8080}." unless ports.is_a?(Hash)
   ports.each do |key, port|
+    next if key.start_with?('_') # a comment
     unless port.is_a?(Integer) && port.between?(1, 65_535)
       abort "Gleipnir: #{where}: ports.#{key} must be a port number, like 8080 (not in quotes)."
     end
@@ -109,6 +114,7 @@ machines = Dir.glob(File.join(root, 'machines', '*.json')).sort.map do |file|
   app_ports = {}
   if settings.key?('apps')
     apps = settings['apps']
+    apps = apps.reject { |app, _| app.start_with?('_') } if apps.is_a?(Hash) # comments
     unless apps.is_a?(Hash) && !apps.empty?
       abort "Gleipnir: #{where}: \"apps\" must list at least one app, e.g. {\"frontend\": {\"port\": 5175}}."
     end
@@ -161,6 +167,7 @@ Vagrant.require_version '>= 2.4'
 
 Vagrant.configure('2') do |config|
   config.vm.box = 'bento/ubuntu-24.04'
+  config.vm.box_version = box_version
 
   # Nothing from your computer is shared into the VMs. Each project lives on its VM's own disk.
   config.vm.synced_folder '.', '/vagrant', disabled: true

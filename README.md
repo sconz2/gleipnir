@@ -59,7 +59,7 @@ These folders are ignored by git, so none of your files in them end up in Gleipn
    cat keys/my-project.pub
    ```
 
-   On GitHub, open the project repo's **Settings → Deploy keys**, add the public key, and tick **Allow write access**. The key only works on that one repo.
+   On GitHub, open the project repo's **Settings → Deploy keys**, add the public key, and tick **Allow write access** (you push from the machine). The key only works on that one repo. See [Your deploy key](#your-deploy-key) for protecting `main` and replacing the key.
 
 2. **Create the machine's config:**
 
@@ -69,7 +69,7 @@ These folders are ignored by git, so none of your files in them end up in Gleipn
 
    For a monorepo, start from `machines/monorepo.json.example` instead.
 
-   Set `repo` (the `git@github.com:…` form) and your git name and email. If another machine already uses ports 8080, 5173 or 54320, pick different `ports`. For a database, set `postgres.enabled` to `true` and choose a password (see [The database](#the-database)). For PHP, set `php.enabled` to `true`.
+   Set `repo` (the `git@github.com:…` form) and your git name and email. To check the config before starting the machine (provisioning checks it anyway, before changing anything): `python3 scripts/files/gleipnir-config machines/my-project.json`. If another machine already uses ports 8080, 5173 or 54320, pick different `ports`. For a database, set `postgres.enabled` to `true` and choose a password (see [The database](#the-database)). For PHP, set `php.enabled` to `true`.
 
    If the project needs a `.env` file, save it as `env/my-project.env` (or one per app in `env/my-project/`).
 
@@ -94,7 +94,7 @@ See [Testing Gleipnir](#testing-gleipnir) for what it covers.
 
 ## Using the editor
 
-Open `http://localhost:8080` in Chrome or Firefox (or the `ports.editor` you chose). There's no password: only your computer can reach that port, and Gjöll stops Claude connecting to the editor from inside the machine.
+Open `http://localhost:8080` in Chrome or Firefox (or the `ports.editor` you chose) and enter the editor's password. Each machine makes its own the first time it's set up; `gpass my-project` shows it (and copies it to the clipboard on a Mac). Only your computer can reach that port, and inside the machine Gjöll stops Claude, the dev servers and the database connecting to the editor, but the password means anything else that reaches it still can't open a terminal as `dev`. To turn it off, set `editor.auth` to `"none"`.
 
 The editor runs as the `dev` user and opens your copy of the project, in `/srv/project`. Its built-in terminal is a shell as `dev`, for reviewing Claude's branches, merging, committing and pushing. Use the Source Control view to review changes and commit.
 
@@ -199,7 +199,7 @@ From your computer, use any database tool (TablePlus, DBeaver, DataGrip, `psql`)
 
 The port only listens on your computer's own `localhost`, so nothing else on your network can reach it.
 
-The database user isn't a PostgreSQL superuser, on purpose: a superuser can run shell commands on the server, which would let anything holding the password step around the machine's restrictions. For admin work, run `sudo -u postgres psql` after `vagrant ssh`.
+The database user isn't a PostgreSQL superuser, on purpose: a superuser can run shell commands on the server, which would let anything holding the password step around the machine's restrictions. It can't make roles either. It can make databases of its own, which some tools need (Prisma's migrations make a temporary "shadow" database, and test runners often make one); set `postgres.createdb` to `false` if yours don't. For admin work, run `sudo -u postgres psql` after `vagrant ssh`.
 
 ### The `.env` files
 
@@ -316,7 +316,7 @@ git push -u origin main
   - **A firewall** that lets `claude` reach only the machine itself (the dev servers, the database) and one port on a local proxy, and `runner` the same with a port of its own. Neither has DNS, so they can't look names up, or carry data out inside lookups. It also stops them connecting to the editor, which would give them a terminal as `dev`.
   - **A proxy (Squid)** that checks every connection by the site's **name**, not its address: first the name the tool asks for, then the name inside the encrypted connection's opening message. Checking names matters because big hosting networks (Cloudflare and similar) serve thousands of sites from the same addresses, so allowing an address would allow them all.
 
-  Most connections, including everything to Anthropic, are never decrypted: the proxy reads the names and passes the rest through untouched. **The package sites are the exception.** The proxy decrypts them and checks each request, so packages can be downloaded but nothing can be uploaded through them: no publishing a package, no gists or issues on GitHub, nothing but GitHub's package downloads at all. (The only uploads let through are npm's and Packagist's security checks, which send a list of package names to a service only they can read.) To do that, each machine makes its own certificate authority for the proxy. Its private key is readable only by root and the proxy, and only the tools Claude runs trust it, through settings Claude gets automatically; the rest of the machine doesn't.
+  Most connections, including everything to Anthropic, are never decrypted: the proxy reads the names and passes the rest through untouched. **The package sites are the exception.** The proxy decrypts them and checks each request, so packages can be downloaded but nothing can be uploaded through them: no publishing a package, no gists or issues on GitHub, nothing but GitHub's package downloads at all. (The only uploads let through are npm's and Packagist's security checks, which send a list of package names to a service only they can read.) To do that, each machine makes its own certificate authority for the proxy. Its private key is readable only by root and the proxy, and only the tools Claude and the dev servers run trust it, through settings they get automatically; the rest of the machine doesn't.
 
   Tools find the proxy through the standard `HTTPS_PROXY` setting, which Claude gets automatically. A tool that ignores it can't connect at all, rather than going round. The proxy and the database server are firewalled too: the proxy can only make HTTPS connections, and PostgreSQL can't connect out at all.
 
@@ -354,6 +354,7 @@ vagrant ssh my-project
 vagrant halt my-project
 vagrant provision my-project  # apply config changes or a Gleipnir update
 genv my-project               # copy just the .env files across (a shortcut: see below)
+gbackup my-project            # an encrypted backup of what lives only in the machine (see below)
 gctx my-project               # copy just the context folder across (a shortcut: see below)
 greview my-project            # bring Claude's branch into your copy (a shortcut: see below)
 vagrant reload my-project     # restart it; needed after changing ports or apps
@@ -380,6 +381,9 @@ They go in your shell's startup file: `~/.zshrc` if your terminal uses zsh (the 
 | `gctx my-project` | Copy just the context folder across (see [Project context](#project-context)) |
 | `gssh my-project` | Log in to a machine (`vagrant ssh`) |
 | `greview my-project` | Bring Claude's current branch into your copy of the project, for review. Name a branch to bring another: `greview my-project wip/2026-10-28` |
+| `gpass my-project` | Show the editor's password, and copy it to the clipboard on a Mac |
+| `gbackup my-project` | Make an encrypted backup of what lives only in the machine, in `backups/` (see [Backups](#backups)) |
+| `grestore my-project <file>` | Restore a backup into a machine, without overwriting anything |
 | `ghalt my-project` | Shut a machine down (`vagrant halt`) |
 | `gdestroy my-project` | Delete a machine (`vagrant destroy`), after a reminder of what's lost. Vagrant still asks you to confirm |
 
@@ -411,18 +415,24 @@ Each `machines/<name>.json` file supports:
 | `devserver.command` | worked out from the project | The command that starts the dev server (for a project with one app). It must listen on `$HOST` and `$PORT` |
 | `playwright.enabled` | `false` | Install Playwright's browsers |
 | `playwright.browsers` | `["chromium"]` | Which browsers: `chromium`, `firefox`, `webkit` |
-| `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry |
+| `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry (add `@1.2.3` for a particular version) |
 | `postgres.enabled` | `false` | Install PostgreSQL |
-| `postgres.version` | 18 | PostgreSQL major version |
+| `postgres.version` | 18 | PostgreSQL major version, 15 or later |
 | `postgres.user` / `postgres.password` | `app` / (required) | The database user for your app |
 | `postgres.databases` | none | Databases to create, owned by that user |
+| `postgres.createdb` | `true` | Whether that user can make databases of its own (some tools need it) |
 | `claude.network` | `allowlist` | `allowlist`, or `open` to let Claude reach any site |
 | `claude.allowed_domains` | none | Extra sites Claude may reach: `docs.example.com` for that site only, `.example.com` for it and everything under it |
 | `runner.allowed_domains` | none | Sites the dev servers may reach, in the same form. With `claude.network` set to `open`, they can reach any site |
 | `claude.wip_branch` | `true` | Claude works on a `wip/` branch, and commits there only when you say. Off: Claude may commit on any branch, which arrives in your copy as `claude/<branch>`. (Formerly `claude.autocommit`, which still works) |
 | `claude.checks` | `true` | Heimdall's change checks |
+| `editor.auth` | `password` | `password` (made for each machine; see it with `gpass`), or `none` for no password |
 
-Gleipnir refuses to start if two machines, or two apps, use the same port, and tells you which.
+Gleipnir refuses to start if two machines, or two apps, use the same port, and tells you which. Provisioning checks the whole config first and lists every problem, before changing anything: a setting it doesn't know (most likely a typo), a wrong type or a value out of range. Keys starting with `_` are ignored, so you can use them for comments, in any section and among the apps.
+
+### Versions
+
+`scripts/versions.sh` pins what Gleipnir installs: the VM's base image, the editor (code-server), Composer, and Playwright's browsers when the project doesn't use Playwright yet. Downloads are checked against the checksums there before they're used, and the apt repositories' signing keys (Node.js from NodeSource, Claude Code) against their fingerprints. So a provision today installs exactly what one did last month. Node.js is the major version you choose (`node`), and its updates, like Ubuntu's, PHP's and PostgreSQL's, come signed from their apt repositories. To update a pinned version, change it and its checksum in `scripts/versions.sh`, try it on a machine with nothing real in it, then provision the rest.
 
 ## Testing Gleipnir
 
@@ -435,6 +445,28 @@ Gleipnir refuses to start if two machines, or two apps, use the same port, and t
 
 The project isn't on your computer. Until you push, the only copy of your work is inside its VM (your commits in your copy, Claude's in its own), and `vagrant destroy` deletes it. Push often. The database lives in the VM too, so `vagrant destroy` deletes its data as well. Gleipnir makes you name the machine (`vagrant destroy my-project`), so a bare `vagrant destroy` can't wipe every machine at once.
 
+### Backups
+
+`gbackup my-project` saves an encrypted backup of what lives only in the machine to `backups/` in the Gleipnir folder (which git ignores):
+
+- every branch in your copy of the project, including ones you haven't pushed;
+- every branch in Claude's copy, and its uncommitted work, as one commit;
+- each database in `postgres.databases`.
+
+It asks for a passphrase, which can't be recovered: keep it in your password manager. The backup is encrypted with AES-256 (in CBC mode, with the passphrase stretched by 600,000 rounds of PBKDF2), and holds a checksum of each part inside the encryption, so a damaged or altered backup is refused rather than restored. Anyone with the file can still try passphrases, so use a long one. The `.env` files, the config and the context folder aren't in it; they're on your computer already. Delete old backups yourself.
+
+To restore, into the same machine or a new one: `grestore my-project backups/my-project-20261030-091500.gleipnir`. Nothing is overwritten. Your branches arrive in your copy as `backup/<name>`, Claude's in its copy as `backup/<name>` (its uncommitted work as `backup/worktree`, which Claude can bring back), and a database is filled only if it has no tables yet (and only one this machine's config lists). The database is restored as the app's own database user, never PostgreSQL's superuser, since what's in it came from the app. Try a restore into a new machine once, so you know it works before you need it.
+
+### Your deploy key
+
+The machine holds the repo's deploy key, with write access, so you can push from it. Only `dev` can read it, and nothing of Claude's runs as `dev`. Even so, protect `main` on GitHub (**Settings → Branches → Add branch protection rule**: require a pull request before merging). Then even someone who got the key couldn't change `main` directly.
+
+To replace the key (if you think it's been exposed, or now and then):
+
+1. Make a new one: `ssh-keygen -t ed25519 -f keys/my-project -C "my-project VM" -N ""` (answer yes to overwrite).
+2. On GitHub, add the new public key under **Settings → Deploy keys**, and delete the old one.
+3. Run `vagrant provision my-project` to put the new key in the machine.
+
 ## Known gaps
 
 Gleipnir keeps Claude well away from your computer, but inside the machine it isn't sealed:
@@ -442,7 +474,7 @@ Gleipnir keeps Claude well away from your computer, but inside the machine it is
 - **The dev servers run Claude's code.** They're firewalled and can't touch your copy, but they share Claude's copy, the database and the machine's local ports with Claude.
 - **Merging is how Claude's code reaches you.** Review a branch before you merge it, and never install packages or run the project's code in your copy.
 - **Gjöll checks names, and only looks inside the package sites' connections.** Some hosting networks let a connection name one of their sites at the start and then ask for another inside the encryption ("domain fronting"); many big networks refuse this now, but not all. Where a network still allows it, a connection that names a site the proxy passes through (such as one of Anthropic's) could reach another site on the same network, a package site included, without being checked. A connection that gives no name at the start is judged by the name it asked the proxy for.
-- **Sites you allow are allowed for anything,** uploads included, unlike the package sites. Code Claude runs could send data to a site on the list, such as an API, using someone else's account there. Keep the list short.
+- **Gjöll controls where connections go, not what they carry.** Sites you allow are allowed for anything, uploads included, unlike the package sites (where only downloads get through). Code Claude runs could send data to a site on the list, such as an API, using someone else's account there. Keep the list short, and avoid wildcards.
 - **Anthropic's own API is a way out too.** It has to be reachable for Claude Code to work, and it can't be limited to your account. Code Claude runs could send data there using someone else's Anthropic account. That's another reason to keep anything sensitive out of the machine.
 - **`.env` protection only covers Claude's file tools.** A shell command run by Claude can still read the files. Keep real production secrets out of these machines.
 - **Claude can read and change everything in its copy of the project**, including its `.git`, and the local database (the password is in `.env`). Use test data, not real personal records.

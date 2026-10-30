@@ -31,14 +31,11 @@ esac
 
 # --- Claude Code, from Anthropic's signed apt repository (stable channel) -------
 # Installed system-wide and owned by root, so the claude user can't modify it.
-install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o /etc/apt/keyrings/claude-code.asc
-key_info="$(gpg --show-keys --with-colons /etc/apt/keyrings/claude-code.asc 2>/dev/null || true)"
-if ! grep -q '31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE' <<<"$key_info"; then
-  fail "Claude Code's signing key fingerprint doesn't match; stopping"
-fi
-echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main" \
+# The signing key is checked by its fingerprint (scripts/versions.sh), and apt trusts only that key.
+trusted_key https://downloads.claude.ai/keys/claude-code.asc "$CLAUDE_CODE_KEY_FINGERPRINT" /etc/apt/keyrings/claude-code.gpg
+echo "deb [signed-by=/etc/apt/keyrings/claude-code.gpg] https://downloads.claude.ai/claude-code/apt/stable stable main" \
   > /etc/apt/sources.list.d/claude-code.list
+rm -f /etc/apt/keyrings/claude-code.asc   # the whole download, as earlier versions kept it
 apt-get update -y >/dev/null
 apt-get install -y claude-code >/dev/null
 

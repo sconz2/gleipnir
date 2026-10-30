@@ -14,8 +14,13 @@ PG_VERSION="$(cfg postgres.version 18)"
 DB_USER="$(cfg postgres.user app)"
 DB_PASSWORD="$(cfg postgres.password '')"
 [[ "$PG_VERSION" =~ ^[0-9]+$ ]] || fail "postgres.version must be a major version number, like 18"
+# 15 or later: the password below is set with psql's \getenv, which 15 added
+[ "$PG_VERSION" -ge 15 ] || fail "postgres.version must be 15 or later"
 [ -n "$DB_PASSWORD" ] || fail "postgres.password is required when PostgreSQL is enabled"
 mapfile -t DATABASES < <(cfg postgres.databases "")
+# Whether the app's user may create databases of its own. On by default: some tools need it
+# (Prisma's migrations make a temporary "shadow" database, and test runners often make one).
+if [ "$(cfg postgres.createdb true)" = "true" ]; then CREATEDB=CREATEDB; else CREATEDB=NOCREATEDB; fi
 
 # --- Install, from PostgreSQL's own apt repository --------------------------------
 apt-get install -y postgresql-common >/dev/null
@@ -45,12 +50,18 @@ pg_isready -q || fail "PostgreSQL didn't start. See: sudo journalctl -u postgres
 # --- The app's database user ------------------------------------------------------------
 # Deliberately not a superuser: a PostgreSQL superuser can run shell commands on
 # the server, which would let anything holding the password (the app, or Claude)
-# step outside Gleipnir's restrictions. For admin work: sudo -u postgres psql
+# step outside Gleipnir's restrictions. Nor can it make roles, or replicate.
+# For admin work: sudo -u postgres psql
+# The password reaches psql through its environment, which only root and postgres can see,
+# never on a command line, which any user (claude included) could read while it runs.
 cd /tmp
-sudo -u postgres psql -v ON_ERROR_STOP=1 -q -v user="$DB_USER" -v pass="$DB_PASSWORD" <<'SQL'
-SELECT format('CREATE ROLE %I LOGIN CREATEDB PASSWORD %L', :'user', :'pass')
+GLEIPNIR_DB_PASSWORD="$DB_PASSWORD" runuser -u postgres -- \
+  psql -v ON_ERROR_STOP=1 -q -v user="$DB_USER" -v createdb="$CREATEDB" <<'SQL'
+\getenv pass GLEIPNIR_DB_PASSWORD
+SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEROLE NOREPLICATION PASSWORD %L', :'user', :'pass')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'user') \gexec
-ALTER ROLE :"user" WITH LOGIN CREATEDB NOSUPERUSER PASSWORD :'pass';
+SELECT format('ALTER ROLE %I WITH LOGIN NOSUPERUSER NOCREATEROLE NOREPLICATION %s PASSWORD %L',
+              :'user', :'createdb', :'pass') \gexec
 SQL
 
 # --- Databases ---------------------------------------------------------------------------
