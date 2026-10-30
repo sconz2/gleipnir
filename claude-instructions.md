@@ -79,7 +79,7 @@ The project is a monorepo. Each app has its own folder, `.env`, packages and dev
 
 ## Git
 
-- Never commit or push on your own. When you've finished a request, summarise what you changed and suggest a commit message. Only what you commit reaches the user's copy (when your session ends, your branch arrives there as `claude/<branch>`).
+- Never commit or push on your own. When you've finished a request, summarise what you changed and suggest a commit message. Only what you commit reaches the user's copy (when your session ends, your branch arrives there as `incoming/<branch>`).
 - `trusted/main` (and the other `trusted/` branches) are the user's branches as they were when this session started. Compare your work with those, not with a local `main`, which may be out of date.
 - Don't change git's own settings or hooks (`.git/config`, `.git/hooks`); the user is shown any change to them.
 - Don't add Co-Authored-By lines or any other attribution to commit messages.

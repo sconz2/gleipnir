@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Gleipnir: bring Claude's work into your copy of the project, for you to review and merge.
 # A wip/ branch of Claude's arrives in your copy (/srv/project) under the same name; any
-# other branch arrives as claude/<name>, so nothing of yours (main) can be replaced.
+# other branch arrives as incoming/<name>, so nothing of yours (main) can be replaced.
 #
 # A branch in your copy is only ever moved forward. If you've added commits of your own to
 # a wip/ branch and Claude's version no longer contains them, Claude's arrives beside yours
-# as claude/wip/<name> instead, and yours is left alone. The claude/ branches are Claude's
-# mirror, replaced whenever its branch changes, so don't commit on those.
+# as incoming/wip/<name> instead, and yours is left alone. The incoming/ branches are
+# Claude's mirror, replaced whenever its branch changes, so don't commit on those. (No
+# branch name here says where it came from: merge messages and pushed branches are yours.)
 #
 #   sudo gleipnir-review             Claude's current branch
 #   sudo gleipnir-review wip/<date>  a branch you name
@@ -43,7 +44,7 @@ if ! [[ "$branch" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*
 fi
 case "$branch" in
   wip/*) dest="$branch" ;;
-  *)     dest="claude/$branch" ;;
+  *)     dest="incoming/$branch" ;;
 esac
 
 # Changes Claude hasn't committed stay behind; say so
@@ -96,11 +97,11 @@ fi
 if current="$(as_dev rev-parse --verify --quiet "refs/heads/$dest^{commit}")" \
     && ! as_dev merge-base --is-ancestor "$current" "$new"; then
   case "$dest" in
-    claude/*) ;;   # Claude's mirror: replaced
+    incoming/*) ;;   # Claude's mirror: replaced
     *)
       echo "Gleipnir: your $dest has commits that Claude's doesn't, so it's left as it is."
-      dest="claude/$dest"
-      echo "  Claude's version is in your copy as $dest instead. Compare them: git log --oneline --graph $dest ${dest#claude/}"
+      dest="incoming/$dest"
+      echo "  Claude's version is in your copy as $dest instead. Compare them: git log --oneline --graph $dest ${dest#incoming/}"
       ;;
   esac
 fi

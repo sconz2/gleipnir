@@ -268,7 +268,7 @@ git branch -D wip/2026-10-29
 
 Keep `main` checked out: a branch you have checked out can't be updated with Claude's latest work. Your commits on `main` reach Claude at the start of its next session, as `trusted/main`.
 
-A branch in your copy is only ever moved forward. If you commit on a `wip/` branch yourself and Claude's version of it no longer contains your commits, yours is left alone and Claude's arrives beside it as `claude/wip/<date>`. The `claude/` branches are Claude's mirror, replaced whenever its branch changes, so don't commit on those.
+A branch in your copy is only ever moved forward. If you commit on a `wip/` branch yourself and Claude's version of it no longer contains your commits, yours is left alone and Claude's arrives beside it as `incoming/wip/<date>`. The `incoming/` branches are Claude's mirror, replaced whenever its branch changes, so don't commit on those. No branch name in your copy says who made it, and a `--squash` merge with your own message records none; a plain `git merge` would put the branch name in the merge message, so give it a message of your own (`-m`), and never push the `wip/` or `incoming/` branches themselves.
 
 ### Claude's instructions
 
@@ -427,7 +427,7 @@ Each `machines/<name>.json` file supports:
 | `claude.network` | `allowlist` | `allowlist`, or `open` to let Claude reach any site |
 | `claude.allowed_domains` | none | Extra sites Claude may reach: `docs.example.com` for that site only, `.example.com` for it and everything under it |
 | `runner.allowed_domains` | none | Sites the dev servers may reach, in the same form. With `claude.network` set to `open`, they can reach any site |
-| `claude.wip_branch` | `true` | Claude works on a `wip/` branch, and commits there only when you say. Off: Claude may commit on any branch, which arrives in your copy as `claude/<branch>`. (Formerly `claude.autocommit`, which still works) |
+| `claude.wip_branch` | `true` | Claude works on a `wip/` branch, and commits there only when you say. Off: Claude may commit on any branch, which arrives in your copy as `incoming/<branch>`. (Formerly `claude.autocommit`, which still works) |
 | `claude.checks` | `true` | Heimdall's change checks |
 | `claude.branches` | none | Branches of yours to copy into Claude's copy as `trusted/<branch>`, besides the one you have checked out and `main`. `["*"]` copies every local branch |
 | `editor.auth` | `password` | `password` (made for each machine; see it with `gpass`), or `none` for no password |
