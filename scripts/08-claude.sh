@@ -298,18 +298,56 @@ else
 fi
 systemctl reload dbus 2>/dev/null || true
 
+# --- Nothing of claude's or runner's runs outside their sessions -----------------------------
+# Code Claude runs could otherwise leave something to start at the next boot (a cron job, an
+# at job, or its own services kept running with "linger"), possibly before Gjöll is up.
+for deny in /etc/cron.deny /etc/at.deny; do
+  touch "$deny"
+  chmod 0644 "$deny"
+  for user in claude runner; do
+    grep -qx "$user" "$deny" || echo "$user" >> "$deny"
+  done
+done
+for user in claude runner; do
+  crontab -r -u "$user" 2>/dev/null || true
+  loginctl disable-linger "$user" 2>/dev/null || true
+done
+if command -v atq >/dev/null; then
+  atq | awk '$NF == "claude" || $NF == "runner" { print $1 }' | xargs -r atrm
+fi
+# polkit: nothing at all for claude or runner (services, linger, power and so on)
+install -d -m 0755 /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/40-gleipnir-claude.rules <<'EOF'
+// Gleipnir: claude and runner may never be allowed anything through polkit: no services,
+// no linger (services of their own kept running, which would start at boot), no power.
+polkit.addRule(function (action, subject) {
+  if (subject.user === "claude" || subject.user === "runner") {
+    return polkit.Result.NO;
+  }
+  return polkit.Result.NOT_HANDLED;
+});
+EOF
+chmod 0644 /etc/polkit-1/rules.d/40-gleipnir-claude.rules
+
 # --- Gjöll: the firewall -----------------------------------------------------------------
 # No longer needed: sites are checked by name in the proxy, not by address
 systemctl disable --now gjoll-firewall.timer >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/gjoll-firewall.timer /etc/gleipnir/allowed-domains
 
+# At boot, before the network, logins, cron and the dev servers: nothing of claude's or
+# runner's ever runs without it
 cat > /etc/systemd/system/gjoll-firewall.service <<'EOF'
 [Unit]
 Description=Gleipnir: Gjöll, the firewall for claude, the dev servers, the proxy and the database
-Before=squid.service
+DefaultDependencies=no
+After=local-fs.target
+Wants=network-pre.target
+Before=network-pre.target systemd-user-sessions.service cron.service atd.service squid.service shutdown.target
+Conflicts=shutdown.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/local/sbin/gjoll-firewall
 
 [Install]
@@ -318,7 +356,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable gjoll-firewall.service >/dev/null 2>&1
-/usr/local/sbin/gjoll-firewall --rebuild
+/usr/local/sbin/gjoll-firewall --rebuild || fail "Gjöll's rules couldn't be put in place; the previous ones are unchanged"
 
 # Restart, never reload: a reload reopens the ports without the warm-up after it
 systemctl enable squid >/dev/null 2>&1

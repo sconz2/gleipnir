@@ -83,20 +83,14 @@ These folders are ignored by git, so none of your files in them end up in Gleipn
 
 ### Checking it worked
 
-After `vagrant ssh my-project`:
+Every provision ends with Gleipnir's self-test, which checks that each user can do what it should and nothing more, and fails the provision if anything's wrong. To run it again, after `vagrant ssh my-project`:
 
 ```bash
-id dev; id claude; id runner            # claude and runner in group "project"; none in sudo
-node -v                                 # the version from the config
-php -v; composer --version              # with php.enabled
-ls -ld /srv/project /srv/work           # yours (dev), and Claude's (claude, group project)
-sudo -u dev git -C /srv/project status  # your copy: a clean working tree
-devserver                               # the dev servers: active (running)
-sudo -u claude curl -s --max-time 3 http://127.0.0.1:8080 || echo blocked   # Claude can't reach the editor
-sudo -u claude getent hosts example.com || echo blocked                     # Claude can't look names up
-sudo -u runner getent hosts example.com || echo blocked                     # nor can the dev servers
-sudo gjoll-firewall --verify            # Gjöll's own checks, including the proxy
+sudo gleipnir-selftest       # everything, including Gjöll's network tests
+devserver                    # the dev servers: active (running)
 ```
+
+See [Testing Gleipnir](#testing-gleipnir) for what it covers.
 
 ## Using the editor
 
@@ -316,6 +310,7 @@ git push -u origin main
 - **The `claude` user** has no `sudo`, and can't read `dev`'s home (so your git key is out of its reach) or your copy of the project.
 - **Two copies of the project.** Claude works in its own. Its work reaches yours only as git data (a bundle of its branch, each object checked as it arrives), so no git hook, git setting or script Claude writes ever runs as you. Gleipnir never runs git in Claude's copy as you either, and Heimdall only reads files there.
 - **The dev servers** run Claude's code, so they run as their own user, `runner`, behind Gjöll with an empty list of sites, and can't see your copy, your home folder or the editor. You can start and stop them; they can't.
+- **Nothing of Claude's runs outside its sessions.** `claude` and `runner` can't use cron or `at`, keep services of their own running ("linger"), or be allowed anything through polkit, so nothing they leave behind starts at the next boot. Gjöll itself is in place at boot before the network, logins, cron and the dev servers.
 - **Týr**, the managed settings in `/etc/claude-code/`, are owned by root and override any user or project settings. They block Claude's file tools from `.env` files, turn off non-essential traffic and Claude's commit attribution, keep your claude.ai connectors (Drive, Gmail and so on) and plugins out of the machine, and run Heimdall's checks. Claude also gets a root-owned `CLAUDE.md` made from `claude-instructions.md` (see above).
 - **Gjöll** limits the `claude` user to Anthropic, the package sites (npm's registry, and with PHP, Packagist and GitHub's package downloads) and the sites you list in `claude.allowed_domains`, in two parts:
   - **A firewall** that lets `claude` reach only the machine itself (the dev servers, the database) and one port on a local proxy, and `runner` the same with a port of its own. Neither has DNS, so they can't look names up, or carry data out inside lookups. It also stops them connecting to the editor, which would give them a terminal as `dev`.
@@ -323,7 +318,9 @@ git push -u origin main
 
   Most connections, including everything to Anthropic, are never decrypted: the proxy reads the names and passes the rest through untouched. **The package sites are the exception.** The proxy decrypts them and checks each request, so packages can be downloaded but nothing can be uploaded through them: no publishing a package, no gists or issues on GitHub, nothing but GitHub's package downloads at all. (The only uploads let through are npm's and Packagist's security checks, which send a list of package names to a service only they can read.) To do that, each machine makes its own certificate authority for the proxy. Its private key is readable only by root and the proxy, and only the tools Claude runs trust it, through settings Claude gets automatically; the rest of the machine doesn't.
 
-  Tools find the proxy through the standard `HTTPS_PROXY` setting, which Claude gets automatically. A tool that ignores it can't connect at all, rather than going round. Claude won't start if the firewall or the proxy isn't running. The proxy and the database server are firewalled too: the proxy can only make HTTPS connections, and PostgreSQL can't connect out at all.
+  Tools find the proxy through the standard `HTTPS_PROXY` setting, which Claude gets automatically. A tool that ignores it can't connect at all, rather than going round. The proxy and the database server are firewalled too: the proxy can only make HTTPS connections, and PostgreSQL can't connect out at all.
+
+  The firewall's rules for IPv4 and IPv6 are each put in place in one step: all of them or none, so a failure leaves the previous rules as they were. Replies get through only as replies, so a connection opened before the rules changed (say, while `claude.network` was `"open"`) can't carry on afterwards. Claude won't start unless every rule is in place exactly as it was put there (`sudo gjoll-firewall --check` shows any difference; `sudo gjoll-firewall --verify` puts them back and tests them), and the proxy is running.
 - **Heimdall** flags changes to package scripts, tool configs and shell scripts, npm and Composer package changes in every app (watch for look-alike names), and new or changed git hooks and settings that run commands: after each turn, and in a summary when you exit. In Claude's copy it only reads files, and says so if it couldn't see everything (a folder it can't read, a link, a huge file). When Claude's branch arrives in your copy, it checks the branch's commits too: that's what you'd merge, whatever Claude's files look like.
 - **npm install scripts** are off by default for the `claude` user, including for the packages installed when the machine is set up.
 - **Git hooks** for Claude's commits: they must go on a `wip/` branch, and their messages can't credit Claude or Anthropic (no trailer, such as `Co-Authored-By:`, that mentions either, and no "Generated with Claude Code" lines).
@@ -426,6 +423,13 @@ Each `machines/<name>.json` file supports:
 | `claude.checks` | `true` | Heimdall's change checks |
 
 Gleipnir refuses to start if two machines, or two apps, use the same port, and tells you which.
+
+## Testing Gleipnir
+
+- **In each machine:** `sudo gleipnir-selftest`, which every provision also runs. It checks the users, both copies of the project, the managed settings, every firewall rule, the dev servers and Heimdall, and with Gjöll's network tests, that Claude and the dev servers really can't look names up or connect anywhere but the proxy.
+- **On your computer:** `python3 -m unittest discover tests/unit` for Heimdall and the config checks, and `tests/lint.sh` for the scripts. GitHub runs both on every push.
+
+`tests/README.md` lists what each one covers. When changing Gleipnir itself, try it on a machine with nothing real in it first.
 
 ## Important: your work lives in the VM
 

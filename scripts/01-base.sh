@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 apt-get update -y
 apt-get upgrade -y
-apt-get install -y curl ca-certificates gnupg git tmux python3 acl iptables ipset
+apt-get install -y curl ca-certificates gnupg git tmux python3 acl iptables ipset polkitd
 # Restart anything the upgrade left running on old libraries (install.sh turns off
 # the check after each install, which repeats the same list every time)
 if command -v needrestart >/dev/null; then needrestart -r a -q >/dev/null 2>&1 || true; fi

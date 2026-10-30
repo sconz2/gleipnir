@@ -16,3 +16,5 @@
 /logs/
 
 .DS_Store
+# Python caches, from running the tests
+__pycache__/

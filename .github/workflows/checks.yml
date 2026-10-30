@@ -1,0 +1,22 @@
+# Gleipnir: the checks that don't need a VM, on every push and pull request.
+# The ones that do (sudo gleipnir-selftest) run in each machine as it's provisioned.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck ruby
+      - name: Lint
+        run: tests/lint.sh
+      - name: Unit tests
+        run: python3 -m unittest discover -v tests/unit

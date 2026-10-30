@@ -27,10 +27,12 @@ if ! sudo -n test -d "$WORK/.git"; then
   exit 1
 fi
 
-# Gjöll must be up before Claude starts. In open mode it still keeps Claude out of the editor.
+# Gjöll must be in place, every rule as it should be, before Claude starts. In open mode it
+# still keeps Claude out of the editor. It isn't rebuilt from here: a difference is shown,
+# for you to look at.
 if ! sudo -n /usr/local/sbin/gjoll-firewall --check; then
-  echo "Gleipnir: the firewall (Gjöll) isn't active, so Claude wasn't started." >&2
-  echo "Start it with: sudo systemctl start gjoll-firewall" >&2
+  echo "Gleipnir: the firewall (Gjöll) isn't as it should be (above), so Claude wasn't started." >&2
+  echo "Put it back with: sudo gjoll-firewall --verify" >&2
   exit 1
 fi
 

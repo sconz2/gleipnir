@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Gleipnir: the self-test. Checks, from inside the machine, that each user can do what it
+# should and nothing more: the two copies of the project, Gjöll, the managed settings, the
+# dev servers and Heimdall. It changes nothing of yours; its own test files go in a
+# temporary folder and are removed.
+#
+#   sudo gleipnir-selftest            everything
+#   sudo gleipnir-selftest --quick    without the network tests (no gjoll-firewall --verify)
+#
+# Provisioning runs it last. It exits non-zero if anything failed.
+#
+# A check that something is refused only counts when the refusal is the expected one (the
+# message, or a control showing the same thing works for someone allowed it), so a missing
+# tool can't make it pass.
+set -uo pipefail
+export LC_ALL=C
+
+[ "$(id -u)" -eq 0 ] || { echo "gleipnir-selftest: run it with sudo" >&2; exit 1; }
+
+QUICK=no
+[ "${1:-}" = "--quick" ] && QUICK=yes
+NETWORK="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
+TRUSTED=/srv/project
+WORK=/srv/work
+CONTEXT=/srv/context
+
+passed=0
+failed=0
+ok()   { passed=$((passed + 1)); echo "  ok    $1"; }
+bad()  { failed=$((failed + 1)); echo "  FAIL  $1"; }
+# should <description> <command...>: the command must succeed
+should()    { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
+# shouldnt <description> <command...>: the command must fail
+shouldnt()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d"; else ok "$d"; fi; }
+# refused <description> <pattern> <command...>: the command must fail, saying so in these words
+refused() {
+  local d="$1" pattern="$2" out; shift 2
+  if out="$("$@" 2>&1)"; then
+    bad "$d (it was allowed)"
+  elif grep -qiE "$pattern" <<<"$out"; then
+    ok "$d"
+  else
+    bad "$d (it failed for another reason: $(head -n 1 <<<"$out"))"
+  fi
+}
+section()   { echo; echo "$1"; }
+owner_mode() { stat -c '%U:%G %a' "$1" 2>/dev/null; }
+is() { [ "$1" = "$2" ]; }
+POLKIT_NO="access denied|interactive authentication required|not authorized|permission denied"
+
+# Test files: Claude's in a folder of claude's, and a folder anyone can leave a marker in
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+chmod 0755 "$scratch"
+install -d -o claude -g claude -m 0755 "$scratch/claude"
+install -d -m 1777 "$scratch/markers"
+markers="$scratch/markers"
+
+echo "Gleipnir self-test"
+
+# --- Users ---------------------------------------------------------------------------------
+section "Users"
+should "sudo works for the checks below (sudo -u claude true)" sudo -u claude true
+for user in dev claude runner; do
+  should "$user exists" id "$user"
+  shouldnt "$user isn't an admin (sudo, admin, wheel)" bash -c "id -nG $user | grep -qwE 'sudo|admin|wheel'"
+  should "$user has no sudo rights" bash -c "sudo -l -U $user | grep -q 'is not allowed to run sudo'"
+done
+shouldnt "dev isn't in the project group" bash -c "id -nG dev | grep -qw project"
+should "claude and runner are in the project group" bash -c "id -nG claude | grep -qw project && id -nG runner | grep -qw project"
+
+# --- Nothing runs outside a session --------------------------------------------------------
+section "Nothing of claude's or runner's runs outside their sessions"
+for user in claude runner; do
+  should "$user can't use cron (in /etc/cron.deny)" grep -qx "$user" /etc/cron.deny
+  shouldnt "$user has no crontab" test -e "/var/spool/cron/crontabs/$user"
+  shouldnt "$user has no services kept running (linger off)" test -e "/var/lib/systemd/linger/$user"
+done
+shouldnt "dev has no services kept running (linger off)" test -e /var/lib/systemd/linger/dev
+refused "claude can't turn linger on (polkit)" "$POLKIT_NO" sudo -u claude loginctl enable-linger claude
+loginctl disable-linger claude >/dev/null 2>&1 || true
+should "Gjöll starts before logins, cron and the network at boot" \
+  bash -c "systemctl show -p Before --value gjoll-firewall.service | grep -q systemd-user-sessions.service"
+
+# --- Your copy -------------------------------------------------------------------------------
+section "Your copy ($TRUSTED)"
+should "it's dev's, closed to everyone else (dev:dev 750)" is "$(owner_mode "$TRUSTED")" "dev:dev 750"
+should "dev can look inside it" sudo -u dev ls "$TRUSTED"
+refused "claude can't look inside it" "permission denied" sudo -u claude ls "$TRUSTED"
+refused "runner can't look inside it" "permission denied" sudo -u runner ls "$TRUSTED"
+refused "claude can't read dev's home" "permission denied" sudo -u claude ls /home/dev
+refused "runner can't read dev's home" "permission denied" sudo -u runner ls /home/dev
+shouldnt "git has no machine-wide safe.directory exceptions" git config --system --get-all safe.directory
+shouldnt "claude's git has no safe.directory exceptions" sudo -u claude -H git config --global --get-all safe.directory
+
+# --- Claude's copy ---------------------------------------------------------------------------
+section "Claude's copy ($WORK)"
+should "it's claude's, shared with the project group (claude:project 2770)" is "$(owner_mode "$WORK")" "claude:project 2770"
+should "dev can read it (for Heimdall)" sudo -u dev ls "$WORK"
+refused "dev can't change it" "permission denied" sudo -u dev touch "$WORK/.gleipnir-selftest"
+rm -f "$WORK/.gleipnir-selftest"
+refused "dev's git refuses to run in it" "dubious ownership" sudo -u dev -H git -C "$WORK" rev-parse --git-dir
+should "its .git is Claude's alone (claude:claude 750)" is "$(owner_mode "$WORK/.git")" "claude:claude 750"
+refused "runner can't get into its .git" "permission denied" sudo -u runner ls "$WORK/.git"
+
+# A disposable repo of Claude's with a hook and a git setting that run commands. dev may
+# write to it, so the only thing stopping them running as dev is git's own refusal.
+repo="$scratch/claude/repo"
+sudo -u claude -H git init -q "$repo" 2>/dev/null
+printf '#!/bin/sh\nid -un > %s/hook-ran-as-$(id -un)\n' "$markers" | sudo -u claude tee "$repo/.git/hooks/post-checkout" >/dev/null
+sudo -u claude chmod +x "$repo/.git/hooks/post-checkout"
+sudo -u claude -H git -C "$repo" -c user.name=selftest -c user.email=selftest@example.invalid \
+  -c commit.gpgsign=false commit -q --allow-empty -m selftest >/dev/null 2>&1
+sudo -u claude -H git -C "$repo" config core.fsmonitor "sh -c 'id -un > $markers/fsmonitor-ran-as-\$(id -un)'"
+sudo -u claude setfacl -R -m u:dev:rwX "$repo"
+sudo -u claude find "$repo" -type d -exec setfacl -m d:u:dev:rwX {} +
+# The test is real: as claude, both run
+sudo -u claude -H git -C "$repo" checkout -q -b selftest-claude >/dev/null 2>&1
+sudo -u claude -H git -C "$repo" status >/dev/null 2>&1
+should "(control: the test hook runs as claude in Claude's own repo)" test -e "$markers/hook-ran-as-claude"
+should "(control: the test fsmonitor setting runs as claude there)" test -e "$markers/fsmonitor-ran-as-claude"
+should "(control: dev could write to the test repo)" sudo -u dev test -w "$repo/.git/HEAD"
+sudo -u dev -H git -C "$repo" status >/dev/null 2>&1
+sudo -u dev -H git -C "$repo" checkout -q -b selftest >/dev/null 2>&1
+shouldnt "a hook in Claude's repo never runs as dev" test -e "$markers/hook-ran-as-dev"
+shouldnt "an fsmonitor setting in Claude's repo never runs as dev" test -e "$markers/fsmonitor-ran-as-dev"
+
+# --- Context -----------------------------------------------------------------------------------
+if [ -e "$CONTEXT" ]; then
+  section "Context ($CONTEXT)"
+  should "it's root's, readable by the project group (root:project 750)" is "$(owner_mode "$CONTEXT")" "root:project 750"
+  refused "claude can't add to it" "permission denied" sudo -u claude touch "$CONTEXT/.gleipnir-selftest"
+  rm -f "$CONTEXT/.gleipnir-selftest"
+fi
+
+# --- Týr and settings ------------------------------------------------------------------------
+section "Settings Claude can't change"
+for file in /etc/claude-code/managed-settings.json /etc/claude-code/CLAUDE.md; do
+  should "$file is root's" is "$(stat -c %U "$file" 2>/dev/null)" root
+  shouldnt "claude can't change $file" sudo -u claude test -w "$file"
+done
+shouldnt "claude can't change /etc/claude-code" sudo -u claude test -w /etc/claude-code
+# A guardrail rather than a lock: claude can override it on purpose
+should "npm install scripts are off for claude by default" is "$(sudo -u claude -H npm config get ignore-scripts 2>/dev/null)" true
+should "the machine's config is root's only (600)" is "$(owner_mode /etc/gleipnir/config.json)" "root:root 600"
+refused "claude can't read the machine's config (passwords)" "permission denied" sudo -u claude cat /etc/gleipnir/config.json
+refused "runner can't read the machine's config (passwords)" "permission denied" sudo -u runner cat /etc/gleipnir/config.json
+
+# --- Gjöll -------------------------------------------------------------------------------------
+section "Gjöll"
+should "every firewall rule is in place, as it should be (gjoll-firewall --check)" /usr/local/sbin/gjoll-firewall --check
+if [ "$NETWORK" = "allowlist" ]; then
+  if resolvectl query example.com >/dev/null 2>&1; then
+    ok "(control: root can look names up through systemd-resolved)"
+    shouldnt "claude can't look names up through systemd-resolved" sudo -u claude resolvectl query example.com
+    shouldnt "runner can't look names up through systemd-resolved" sudo -u runner resolvectl query example.com
+  else
+    bad "(control: root can't look names up through systemd-resolved, so this couldn't be tested)"
+  fi
+  should "Squid's config parses" squid -k parse -f /etc/squid/squid.conf
+fi
+if [ "$QUICK" = no ]; then
+  should "Gjöll's own tests pass (gjoll-firewall --verify)" /usr/local/sbin/gjoll-firewall --verify
+fi
+
+# --- Dev servers ---------------------------------------------------------------------------------
+section "Dev servers"
+shouldnt "no dev servers run as dev (earlier versions' user services are gone)" test -e /etc/systemd/user/gleipnir-dev@.service
+refused "dev can't start other services (polkit)" "$POLKIT_NO" \
+  sudo -u dev systemctl --no-ask-password start systemd-tmpfiles-clean.service
+refused "claude can't start services (polkit)" "$POLKIT_NO" \
+  sudo -u claude systemctl --no-ask-password start systemd-tmpfiles-clean.service
+if [ -s /etc/gleipnir/devservers ]; then
+  while IFS=$'\t' read -r name _; do
+    unit="gleipnir-dev@$name.service"
+    should "$name runs as runner" is "$(systemctl show -p User --value "$unit" 2>/dev/null)" runner
+    should "$name can't see your copy of the project" bash -c "systemctl show -p InaccessiblePaths --value '$unit' | grep -q '$TRUSTED'"
+    # Not a containment problem, so only noted: the app itself may have an error
+    systemctl is-active --quiet "$unit" 2>/dev/null || echo "  note  $name isn't running (see: devserver log $name)"
+    should "dev can control $name (polkit)" sudo -u dev systemctl --no-ask-password reset-failed "$unit"
+  done < /etc/gleipnir/devservers
+else
+  echo "  (no dev servers set up yet)"
+fi
+
+# --- Heimdall --------------------------------------------------------------------------------
+if [ -x /usr/local/bin/heimdall-check ]; then
+  section "Heimdall"
+  # Run as dev, as the claude command does, over a project of claude's
+  project="$scratch/claude/heimdall"
+  sudo -u claude mkdir -p "$project/.git/hooks" "$project/apps/backend/lib/deeper"
+  printf '#!/bin/sh\necho one\n' | sudo -u claude tee "$project/.git/hooks/post-checkout" >/dev/null
+  sudo -u claude chmod -R go+rX "$project"
+  snap="$markers/heimdall.json"
+  sudo -u dev -H /usr/local/bin/heimdall-check --snapshot "$snap" "$project"
+  printf '#!/bin/sh\necho two\n' | sudo -u claude tee "$project/.git/hooks/post-checkout" >/dev/null
+  echo '{}' | sudo -u claude tee "$project/apps/backend/lib/deeper/package.json" >/dev/null
+  summary="$(sudo -u dev -H /usr/local/bin/heimdall-check --summary "$snap" "$project")"
+  should "it reports a changed git hook" grep -q "changed .git/hooks/post-checkout" <<<"$summary"
+  should "it reports a package.json deep in the project" grep -q "added   apps/backend/lib/deeper/package.json" <<<"$summary"
+fi
+
+echo
+echo "Gleipnir self-test: $passed passed, $failed failed"
+[ "$failed" -eq 0 ]

@@ -11,17 +11,23 @@
 #   proxy     Squid itself: HTTPS (port 443) out, and localhost, which includes
 #             the machine's DNS resolver. Nothing else. (Squid decrypts the package
 #             sites to check each request, so it makes those connections itself.)
-#   postgres  The database server: localhost (but not the proxy), and replies to
-#             connections made to it. It never needs to connect out.
+#   postgres  The database server: localhost (but not the proxy or the editor), and
+#             replies to connections made to it. It never needs to connect out.
 #
-# In every mode, claude and runner can't connect to the editor (port 8080), which
-# would give them a terminal as dev.
+# In every mode, none of them can connect to the editor (port 8080), which would give
+# them a terminal as dev.
 #
-#   gjoll-firewall             apply the rules if missing
-#   gjoll-firewall --rebuild   remove and re-create the rules
-#   gjoll-firewall --remove    remove the rules
-#   gjoll-firewall --check     exit 0 only if the rules are in place
-#   gjoll-firewall --verify    apply if missing, then test that blocking works
+# The rules for IPv4 and IPv6 are each put in place in one step (iptables-restore): all of
+# them or none, so a failure leaves the previous rules as they were, never a gap. --check
+# makes sure each chain has the rules it should, first in OUTPUT and in order, and compares
+# every live rule with what was put in place. Replies are let through only as replies: a
+# connection claude or runner opened before the rules went on can't carry on afterwards.
+#
+#   gjoll-firewall             check the rules, and put them in place if they're not right
+#   gjoll-firewall --rebuild   put them in place again
+#   gjoll-firewall --remove    remove them
+#   gjoll-firewall --check     exit 0 only if every rule is in place, as it should be
+#   gjoll-firewall --verify    put them in place if they're not right, then test that blocking works
 set -uo pipefail
 
 MODE="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
@@ -30,146 +36,269 @@ CLAUDE_PROXY_PORT=3128
 RUNNER_PROXY_PORT=3129
 # Squid's inner ports, which only Squid itself may use
 INNER_PROXY_PORTS=3138,3139
+# What was put in place, for --check (root only)
+STATE=/var/lib/gleipnir/gjoll-state
 # Read by gjoll-log, so this script's own DNS test isn't reported as a blocked lookup
 CHECK_TIMES=/var/lib/gleipnir/dns-check-times
 # The certificates claude's tools trust: the system's, plus the proxy's own for the package sites
 CA_BUNDLE=/etc/gleipnir/ca-bundle.pem
 # Blocked attempts are logged, but no faster than this, so a retry loop can't flood the log
-LOG_LIMIT=(-m limit --limit 10/min --limit-burst 20)
+LOG_LIMIT="-m limit --limit 10/min --limit-burst 20"
 
-# Each user Gjöll covers, and its chain
+# Each user Gjöll covers, in the order their rules come first in OUTPUT, and its chain
+USERS=(claude runner proxy postgres)
 declare -A CHAINS=([claude]=GJOLL [runner]=GJOLL_RUN [proxy]=GJOLL_PROXY [postgres]=GJOLL_PG)
+OUR_CHAINS="GJOLL|GJOLL_RUN|GJOLL_PROXY|GJOLL_PG"
 
-user_exists() { id -u "$1" >/dev/null 2>&1; }
+uid_of() { id -u "$1" 2>/dev/null; }
 
-jump_present() { # ipt user chain
-  "$1" -C OUTPUT -m owner --uid-owner "$2" -j "$3" >/dev/null 2>&1
-}
+say() { echo "Gjöll: $*" >&2; }
 
-rules_present() {
-  local ipt user
-  for ipt in iptables ip6tables; do
-    for user in "${!CHAINS[@]}"; do
-      user_exists "$user" || continue
-      jump_present "$ipt" "$user" "${CHAINS[$user]}" || return 1
-    done
-    # The rules that matter most: claude and runner kept out of the editor, and the final verdict
-    local chain port
-    for chain in GJOLL GJOLL_RUN; do
-      [ "$chain" = GJOLL ] && port="$CLAUDE_PROXY_PORT" || port="$RUNNER_PROXY_PORT"
-      "$ipt" -C "$chain" -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset >/dev/null 2>&1 || return 1
-      if [ "$MODE" = "open" ]; then
-        "$ipt" -C "$chain" -j ACCEPT >/dev/null 2>&1 || return 1
-      else
-        "$ipt" -C "$chain" -o lo -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1 || return 1
-        "$ipt" -C "$chain" -j REJECT >/dev/null 2>&1 || return 1
-      fi
-    done
+# claude and runner must exist: rules for them can't be skipped
+required_users() {
+  local user
+  for user in claude runner; do
+    uid_of "$user" >/dev/null || { say "ERROR: the $user user doesn't exist, so its rules can't be put in place"; return 1; }
   done
 }
 
-remove_rules() {
-  local ipt user chain
-  for ipt in iptables ip6tables; do
-    for user in "${!CHAINS[@]}"; do
-      chain="${CHAINS[$user]}"
-      if user_exists "$user"; then
-        while "$ipt" -D OUTPUT -m owner --uid-owner "$user" -j "$chain" 2>/dev/null; do :; done
-      fi
-      "$ipt" -F "$chain" 2>/dev/null || true
-      "$ipt" -X "$chain" 2>/dev/null || true
-    done
-  done
-}
-
-# A fresh, empty chain
-new_chain() { # ipt chain
-  "$1" -F "$2" 2>/dev/null && "$1" -X "$2" 2>/dev/null
-  "$1" -N "$2"
-}
-
-# Log (rate-limited), then refuse
-log_and_reject() { # ipt chain label
-  "$1" -A "$2" "${LOG_LIMIT[@]}" -j LOG --log-prefix "gjoll $3 blocked: " --log-uid
-  "$1" -A "$2" -j REJECT
-}
-
-# Swap a finished chain in for a user, with no moment where the user is unrestricted:
-# the new chain's jump goes in first, then the old chain is removed and the new one renamed.
-swap_in() { # ipt user chain
-  local ipt="$1" user="$2" chain="$3"
-  "$ipt" -I OUTPUT 1 -m owner --uid-owner "$user" -j "$chain.new"
-  while "$ipt" -D OUTPUT -m owner --uid-owner "$user" -j "$chain" 2>/dev/null; do :; done
-  "$ipt" -F "$chain" 2>/dev/null && "$ipt" -X "$chain" 2>/dev/null
-  "$ipt" -E "$chain.new" "$chain"
-}
+# --- The rules ---------------------------------------------------------------------------------
+# Printed in iptables-restore's form, the same for IPv4 and IPv6.
 
 # claude and runner: the same rules, each with its own port on the proxy
-build_contained() { # ipt chain user own-port other-port
-  local ipt="$1" c="$2" user="$3" own="$4" other="$5"
-  "$ipt" -A "$c" -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset
+contained_rules() { # chain user own-port other-port
+  local c="$1" user="$2" own="$3" other="$4" proto
+  echo "-A $c -p tcp --dport $EDITOR_PORT -j REJECT --reject-with tcp-reset"
   if [ "$MODE" = "open" ]; then
-    "$ipt" -A "$c" -o lo -j ACCEPT
-    "$ipt" -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    "$ipt" -A "$c" -m conntrack --ctstate NEW -j LOG --log-prefix "gjoll $user: " --log-uid
-    "$ipt" -A "$c" -j ACCEPT
+    echo "-A $c -o lo -j ACCEPT"
+    echo "-A $c -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT"
+    echo "-A $c -m conntrack --ctstate NEW -j LOG --log-prefix \"gjoll $user: \" --log-uid"
+    echo "-A $c -j ACCEPT"
+    return
+  fi
+  # No DNS, including the machine's own resolver on 127.0.0.53. Logged: it usually means
+  # a tool that isn't using the proxy.
+  for proto in udp tcp; do
+    echo "-A $c -p $proto --dport 53 $LOG_LIMIT -j LOG --log-prefix \"gjoll $user blocked: \" --log-uid"
+    echo "-A $c -p $proto --dport 53 -j REJECT"
+  done
+  echo "-A $c -o lo -p tcp --dport $own -j ACCEPT"
+  echo "-A $c -o lo -p tcp -m multiport --dports $other,$INNER_PROXY_PORTS -j REJECT --reject-with tcp-reset"
+  # The rest of localhost: the dev servers, the database
+  echo "-A $c -o lo -j ACCEPT"
+  # Replies to connections made to it (the dev servers, from your computer's forwarded ports)
+  echo "-A $c -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT"
+  echo "-A $c $LOG_LIMIT -j LOG --log-prefix \"gjoll $user blocked: \" --log-uid"
+  echo "-A $c -j REJECT"
+}
+
+proxy_rules() { # chain
+  local c="$1"
+  echo "-A $c -p tcp --dport $EDITOR_PORT -j REJECT --reject-with tcp-reset"
+  echo "-A $c -o lo -j ACCEPT"
+  echo "-A $c -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+  echo "-A $c -p tcp --dport 443 -j ACCEPT"
+  echo "-A $c $LOG_LIMIT -j LOG --log-prefix \"gjoll proxy blocked: \" --log-uid"
+  echo "-A $c -j REJECT"
+}
+
+postgres_rules() { # chain
+  local c="$1"
+  # Not the editor, nor the proxy: the database never needs to reach a website
+  echo "-A $c -p tcp --dport $EDITOR_PORT -j REJECT --reject-with tcp-reset"
+  echo "-A $c -o lo -p tcp -m multiport --dports $CLAUDE_PROXY_PORT,$RUNNER_PROXY_PORT,$INNER_PROXY_PORTS -j REJECT --reject-with tcp-reset"
+  echo "-A $c -o lo -j ACCEPT"
+  # Replies to connections made to it, including your computer's through the forwarded port
+  echo "-A $c -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT"
+  echo "-A $c $LOG_LIMIT -j LOG --log-prefix \"gjoll postgres blocked: \" --log-uid"
+  echo "-A $c -j REJECT"
+}
+
+user_rules() { # user
+  local c="${CHAINS[$1]}"
+  case "$1" in
+    claude)   contained_rules "$c" claude "$CLAUDE_PROXY_PORT" "$RUNNER_PROXY_PORT" ;;
+    runner)   contained_rules "$c" runner "$RUNNER_PROXY_PORT" "$CLAUDE_PROXY_PORT" ;;
+    proxy)    proxy_rules "$c" ;;
+    postgres) postgres_rules "$c" ;;
+  esac
+}
+
+# The intended rules, for every user that exists. Their fingerprint tells --check whether
+# the rules in place were made from the current settings.
+intended() {
+  local user uid
+  echo "mode $MODE"
+  for user in "${USERS[@]}"; do
+    uid="$(uid_of "$user")" || continue
+    echo "user $user $uid"
+    user_rules "$user"
+  done
+}
+
+# One family's whole change, as iptables-restore input: our chains emptied and refilled,
+# the old jumps to them removed, and fresh ones put first in OUTPUT, all in one step
+restore_input() { # ipt
+  local ipt="$1" user uid chain i leftovers
+  echo "*filter"
+  for user in "${USERS[@]}"; do
+    uid_of "$user" >/dev/null || continue
+    echo ":${CHAINS[$user]} - [0:0]"
+  done
+  # Chains left by the earlier, step-by-step way of making them
+  leftovers="$("$ipt" -S 2>/dev/null | awk '$1 == "-N" && $2 ~ /^GJOLL[A-Z_]*\.new$/ { print $2 }')"
+  for chain in $leftovers; do echo ":$chain - [0:0]"; done
+  for user in "${USERS[@]}"; do
+    uid_of "$user" >/dev/null || continue
+    user_rules "$user"
+  done
+  "$ipt" -S OUTPUT 2>/dev/null | grep -E -- "-j ($OUR_CHAINS)(\.new)?\$" | sed 's/^-A /-D /'
+  for chain in $leftovers; do echo "-X $chain"; done
+  for (( i=${#USERS[@]}-1; i>=0; i-- )); do
+    user="${USERS[$i]}"
+    uid="$(uid_of "$user")" || continue
+    echo "-I OUTPUT 1 -m owner --uid-owner $uid -j ${CHAINS[$user]}"
+  done
+  echo "COMMIT"
+}
+
+# One chain as iptables prints it, without its warnings (such as one about tables made by
+# iptables-legacy), or a line saying it couldn't be read
+listing() { # ipt chain
+  local out
+  if out="$("$1" -S "$2" 2>/dev/null)"; then
+    printf '%s\n' "$out" | grep -v '^#'
   else
-    # No DNS, including the machine's own resolver on 127.0.0.53. Logged: it usually
-    # means a tool that isn't using the proxy.
-    local proto
-    for proto in udp tcp; do
-      "$ipt" -A "$c" -p "$proto" --dport 53 "${LOG_LIMIT[@]}" -j LOG --log-prefix "gjoll $user blocked: " --log-uid
-      "$ipt" -A "$c" -p "$proto" --dport 53 -j REJECT
-    done
-    "$ipt" -A "$c" -o lo -p tcp --dport "$own" -j ACCEPT
-    "$ipt" -A "$c" -o lo -p tcp -m multiport --dports "$other,$INNER_PROXY_PORTS" -j REJECT --reject-with tcp-reset
-    # The rest of localhost: the dev servers, the database
-    "$ipt" -A "$c" -o lo -j ACCEPT
-    "$ipt" -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    log_and_reject "$ipt" "$c" "$user"
+    echo "(couldn't read $2)"
   fi
 }
 
-build_claude() { build_contained "$1" "$2" claude "$CLAUDE_PROXY_PORT" "$RUNNER_PROXY_PORT"; }
-build_runner() { build_contained "$1" "$2" runner "$RUNNER_PROXY_PORT" "$CLAUDE_PROXY_PORT"; }
-
-build_proxy() { # ipt chain
-  local ipt="$1" c="$2"
-  "$ipt" -A "$c" -p tcp --dport "$EDITOR_PORT" -j REJECT --reject-with tcp-reset
-  "$ipt" -A "$c" -o lo -j ACCEPT
-  "$ipt" -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  "$ipt" -A "$c" -p tcp --dport 443 -j ACCEPT
-  log_and_reject "$ipt" "$c" proxy
+# What's live: OUTPUT, and each of our chains
+live() { # ipt
+  local ipt="$1" user
+  listing "$ipt" OUTPUT
+  for user in "${USERS[@]}"; do
+    uid_of "$user" >/dev/null || continue
+    listing "$ipt" "${CHAINS[$user]}"
+  done
 }
 
-build_postgres() { # ipt chain
-  local ipt="$1" c="$2"
-  # Not the proxy either: the database never needs to reach a website
-  "$ipt" -A "$c" -o lo -p tcp -m multiport --dports "$CLAUDE_PROXY_PORT,$RUNNER_PROXY_PORT,$INNER_PROXY_PORTS" -j REJECT --reject-with tcp-reset
-  "$ipt" -A "$c" -o lo -j ACCEPT
-  # Replies to connections made to it, including your computer's through the forwarded port
-  "$ipt" -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  log_and_reject "$ipt" "$c" postgres
+# The shape every family must have, whatever was recorded: our jumps first in OUTPUT, in
+# order; each chain with exactly as many rules as it should have, starting with the editor's
+# refusal and ending in a refusal (or, in open mode, the logged accept)
+structure() { # ipt
+  local ipt="$1" user uid chain i=0 rules expected first last problems=0 want_last
+  local -a output
+  mapfile -t output < <(listing "$ipt" OUTPUT | grep '^-A ')
+  for user in "${USERS[@]}"; do
+    uid="$(uid_of "$user")" || continue
+    chain="${CHAINS[$user]}"
+    if [ "${output[$i]:-}" != "-A OUTPUT -m owner --uid-owner $uid -j $chain" ]; then
+      say "$ipt: OUTPUT doesn't start with the jump for $user (rule $((i + 1)) is: ${output[$i]:-nothing})"
+      problems=1
+    fi
+    i=$((i + 1))
+    rules="$(listing "$ipt" "$chain" | grep '^-A ')"
+    expected="$(user_rules "$user" | wc -l)"
+    if [ "$(printf '%s\n' "$rules" | grep -c '^-A ')" -ne "$expected" ]; then
+      say "$ipt: $chain should have $expected rules"
+      problems=1
+      continue
+    fi
+    first="$(printf '%s\n' "$rules" | head -n 1)"
+    last="$(printf '%s\n' "$rules" | tail -n 1)"
+    if [ "$first" != "-A $chain -p tcp -m tcp --dport $EDITOR_PORT -j REJECT --reject-with tcp-reset" ]; then
+      say "$ipt: $chain doesn't start by refusing the editor"
+      problems=1
+    fi
+    want_last="-A $chain -j REJECT --reject-with icmp-port-unreachable"
+    [ "$ipt" = ip6tables ] && want_last="-A $chain -j REJECT --reject-with icmp6-port-unreachable"
+    if [ "$MODE" = open ] && { [ "$user" = claude ] || [ "$user" = runner ]; }; then
+      want_last="-A $chain -j ACCEPT"
+    fi
+    if [ "$last" != "$want_last" ]; then
+      say "$ipt: $chain doesn't end as it should (it ends: $last)"
+      problems=1
+    fi
+  done
+  return "$problems"
 }
 
-# Each chain is built complete, ending in a verdict, before it's swapped in
-build_rules() {
-  local ipt user chain
+snapshot() {
+  local ipt
+  echo "intended $(intended | sha256sum | cut -d' ' -f1)"
   for ipt in iptables ip6tables; do
-    for user in claude runner proxy postgres; do
-      user_exists "$user" || continue
-      chain="${CHAINS[$user]}"
-      new_chain "$ipt" "$chain.new"
-      "build_$user" "$ipt" "$chain.new"
-      swap_in "$ipt" "$user" "$chain"
-    done
+    echo "== $ipt"
+    live "$ipt"
+  done
+}
+
+# --- Putting them in place, checking and removing ----------------------------------------
+
+apply() {
+  local ipt input failed=0
+  required_users || return 1
+  for ipt in iptables ip6tables; do
+    input="$(restore_input "$ipt")"
+    if ! printf '%s\n' "$input" | "$ipt-restore" -w 10 --noflush; then
+      say "ERROR: couldn't put the $ipt rules in place; the previous ones are unchanged"
+      failed=1
+    fi
   done
   # Left over from the version that allowed sites by address
   if command -v ipset >/dev/null 2>&1; then
     ipset destroy gjoll-allowed 2>/dev/null || true
     ipset destroy gjoll-allowed-new 2>/dev/null || true
   fi
+  [ "$failed" -eq 0 ] || return 1
+  # Recorded only once each family has the shape it must have
+  structure iptables && structure ip6tables || return 1
+  install -d -m 0755 "$(dirname "$STATE")"
+  ( umask 077; snapshot > "$STATE.new" ) && mv "$STATE.new" "$STATE"
+  check
 }
+
+check() {
+  local expected live_now
+  required_users || return 1
+  structure iptables && structure ip6tables || return 1
+  if [ ! -s "$STATE" ]; then
+    say "the rules have never been put in place on this machine"
+    return 1
+  fi
+  if [ "$(head -n 1 "$STATE")" != "intended $(intended | sha256sum | cut -d' ' -f1)" ]; then
+    say "the rules in place were made for different settings (claude.network, or a user changed)"
+    return 1
+  fi
+  expected="$(cat "$STATE")"
+  live_now="$(snapshot)"
+  if [ "$live_now" != "$expected" ]; then
+    say "the live rules differ from the ones put in place:"
+    diff <(printf '%s\n' "$expected") <(printf '%s\n' "$live_now") | grep -E '^[<>]' | head -n 10 \
+      | sed 's/^</  missing:/; s/^>/  extra:  /' >&2
+    return 1
+  fi
+}
+
+remove_rules() {
+  local ipt user
+  for ipt in iptables ip6tables; do
+    {
+      echo "*filter"
+      for user in "${USERS[@]}"; do
+        "$ipt" -S "${CHAINS[$user]}" >/dev/null 2>&1 && echo ":${CHAINS[$user]} - [0:0]"
+      done
+      "$ipt" -S OUTPUT 2>/dev/null | grep -E -- "-j ($OUR_CHAINS)(\.new)?\$" | sed 's/^-A /-D /'
+      for user in "${USERS[@]}"; do
+        "$ipt" -S "${CHAINS[$user]}" >/dev/null 2>&1 && echo "-X ${CHAINS[$user]}"
+      done
+      echo "COMMIT"
+    } | "$ipt-restore" -w 10 --noflush || { say "ERROR: couldn't remove the $ipt rules"; return 1; }
+  done
+  rm -f "$STATE"
+}
+
+# --- Testing that blocking works ----------------------------------------------------------------
 
 # Does the user get through? (0 = it connected)
 as_user_curl() { # user curl-args...
@@ -179,12 +308,12 @@ as_user_curl() { # user curl-args...
 as_claude_curl() { as_user_curl claude "$@"; }
 
 verify() {
-  local failed=0 code address user own other
+  local failed=0 code address address6 user other result
 
-  for user in claude runner; do
-    user_exists "$user" || continue
+  for user in claude runner proxy postgres; do
+    uid_of "$user" >/dev/null || continue
     if as_user_curl "$user" --noproxy '*' "http://127.0.0.1:$EDITOR_PORT/healthz"; then
-      echo "Gjöll: ERROR: the $user user can reach the editor" >&2
+      say "ERROR: the $user user can reach the editor"
       failed=1
     fi
   done
@@ -197,20 +326,33 @@ verify() {
   # No DNS. The time is noted so gjoll-log can leave this test's own lookups out.
   install -d -m 0755 /var/lib/gleipnir
   { tail -n 49 "$CHECK_TIMES" 2>/dev/null; date +%s; } > "$CHECK_TIMES.new" && mv "$CHECK_TIMES.new" "$CHECK_TIMES"
+  # Addresses root can reach directly, so a blocked connection really means Gjöll blocked it
   address="$(getent ahostsv4 example.com 2>/dev/null | awk 'NR == 1 { print $1 }')"
-  [ -n "$address" ] || echo "Gjöll: WARNING: couldn't look up example.com to test direct connections" >&2
+  if [ -n "$address" ] && ! curl -s --max-time 8 -o /dev/null --noproxy '*' -k "https://$address/"; then
+    address=""
+  fi
+  [ -n "$address" ] || say "WARNING: couldn't reach example.com over IPv4 to test direct connections"
+  address6="$(getent ahostsv6 example.com 2>/dev/null | awk 'NR == 1 && $1 ~ /:/ { print $1 }')"
+  if [ -n "$address6" ] && ! curl -s --max-time 8 -o /dev/null --noproxy '*' -k "https://[$address6]/"; then
+    address6=""   # no IPv6 route out of this machine; the IPv6 rules are still compared by --check
+  fi
+
   for user in claude runner; do
-    user_exists "$user" || continue
-    if [ "$user" = claude ]; then own="$CLAUDE_PROXY_PORT" other="$RUNNER_PROXY_PORT"; else own="$RUNNER_PROXY_PORT" other="$CLAUDE_PROXY_PORT"; fi
+    uid_of "$user" >/dev/null || continue
+    if [ "$user" = claude ]; then other="$RUNNER_PROXY_PORT"; else other="$CLAUDE_PROXY_PORT"; fi
 
     if sudo -u "$user" getent ahosts example.com >/dev/null 2>&1; then
-      echo "Gjöll: ERROR: the $user user can look up names (DNS isn't blocked)" >&2
+      say "ERROR: the $user user can look up names (DNS isn't blocked)"
       failed=1
     fi
 
     # No direct connections, even to an address that works for everyone else
     if [ -n "$address" ] && as_user_curl "$user" --noproxy '*' -k "https://$address/"; then
-      echo "Gjöll: ERROR: the $user user can connect directly to $address, bypassing the proxy" >&2
+      say "ERROR: the $user user can connect directly to $address, bypassing the proxy"
+      failed=1
+    fi
+    if [ -n "$address6" ] && as_user_curl "$user" --noproxy '*' -k "https://[$address6]/"; then
+      say "ERROR: the $user user can connect directly to $address6 over IPv6, bypassing the proxy"
       failed=1
     fi
 
@@ -218,18 +360,18 @@ verify() {
     if as_user_curl "$user" --noproxy '*' "http://127.0.0.1:$other/" \
         || as_user_curl "$user" --noproxy '*' "http://127.0.0.1:3138/" \
         || as_user_curl "$user" --noproxy '*' "http://127.0.0.1:3139/"; then
-      echo "Gjöll: ERROR: the $user user can reach a proxy port that isn't its own" >&2
+      say "ERROR: the $user user can reach a proxy port that isn't its own"
       failed=1
     fi
   done
 
   # The dev servers' list is empty unless you add sites: the proxy refuses the rest
-  if user_exists runner; then
+  if uid_of runner >/dev/null; then
     code="$(sudo -u runner curl -s --max-time 8 -o /dev/null -w '%{http_connect}' \
       -x "http://127.0.0.1:$RUNNER_PROXY_PORT" https://gleipnir-check.invalid/ 2>/dev/null)"
     case "$code" in
       403|000) ;;
-      *) echo "Gjöll: ERROR: the proxy didn't refuse the dev servers a site that isn't on their list (answered $code)" >&2; failed=1 ;;
+      *) say "ERROR: the proxy didn't refuse the dev servers a site that isn't on their list (answered $code)"; failed=1 ;;
     esac
   fi
 
@@ -238,13 +380,13 @@ verify() {
     -x "http://127.0.0.1:$CLAUDE_PROXY_PORT" https://gleipnir-check.invalid/ 2>/dev/null)"
   case "$code" in
     403) ;;
-    000) echo "Gjöll: WARNING: the proxy isn't answering; Claude has no network until it does (sudo systemctl restart squid)" >&2 ;;
-    *)   echo "Gjöll: ERROR: the proxy didn't refuse a site that isn't on the list (answered $code)" >&2; failed=1 ;;
+    000) say "WARNING: the proxy isn't answering; Claude has no network until it does (sudo systemctl restart squid)" ;;
+    *)   say "ERROR: the proxy didn't refuse a site that isn't on the list (answered $code)"; failed=1 ;;
   esac
 
   # And lets Anthropic through
   if [ "$code" = "403" ] && ! as_claude_curl -x "http://127.0.0.1:$CLAUDE_PROXY_PORT" https://api.anthropic.com; then
-    echo "Gjöll: WARNING: the claude user can't reach api.anthropic.com through the proxy; Claude Code may not work" >&2
+    say "WARNING: the claude user can't reach api.anthropic.com through the proxy; Claude Code may not work"
   fi
 
   # Package sites: decrypted, and only downloads allowed. Two uploads to npm must be refused
@@ -295,9 +437,9 @@ PY
     case "$result" in
       ok) ;;
       unreachable|error)
-        echo "Gjöll: WARNING: couldn't reach npm through the proxy to test that uploads are refused" >&2 ;;
+        say "WARNING: couldn't reach npm through the proxy to test that uploads are refused" ;;
       *)
-        echo "Gjöll: ERROR: the proxy didn't refuse uploads to npm ($result)" >&2; failed=1 ;;
+        say "ERROR: the proxy didn't refuse uploads to npm ($result)"; failed=1 ;;
     esac
   fi
 
@@ -305,11 +447,17 @@ PY
   return "$failed"
 }
 
+[ "$(id -u)" -eq 0 ] || { echo "gjoll-firewall: run it with sudo" >&2; exit 1; }
+
+# One at a time: at boot, the dev servers' services and provisioning can all start it
+exec 9>/run/gjoll-firewall.lock
+flock -w 60 9 || { say "ERROR: another gjoll-firewall is still running"; exit 1; }
+
 case "${1:-}" in
-  "")        rules_present || build_rules ;;
-  --rebuild) build_rules ;;
-  --remove)  remove_rules; echo "Gjöll: removed" ;;
-  --check)   rules_present ;;
-  --verify)  rules_present || build_rules; verify ;;
+  "")        check 2>/dev/null || apply ;;
+  --rebuild) apply ;;
+  --remove)  remove_rules && echo "Gjöll: removed" ;;
+  --check)   check ;;
+  --verify)  { check 2>/dev/null || apply; } && verify ;;
   *)         echo "usage: $0 [--rebuild|--remove|--check|--verify]" >&2; exit 2 ;;
 esac
