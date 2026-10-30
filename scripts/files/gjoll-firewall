@@ -326,14 +326,18 @@ verify() {
   # No DNS. The time is noted so gjoll-log can leave this test's own lookups out.
   install -d -m 0755 /var/lib/gleipnir
   { tail -n 49 "$CHECK_TIMES" 2>/dev/null; date +%s; } > "$CHECK_TIMES.new" && mv "$CHECK_TIMES.new" "$CHECK_TIMES"
-  # Addresses root can reach directly, so a blocked connection really means Gjöll blocked it
+  # Addresses root can reach directly, so a blocked connection really means Gjöll blocked it.
+  # Connected to by address but with the site's name in the request (--resolve), since
+  # hosting networks such as Cloudflare refuse a connection that doesn't name a site.
   address="$(getent ahostsv4 example.com 2>/dev/null | awk 'NR == 1 { print $1 }')"
-  if [ -n "$address" ] && ! curl -s --max-time 8 -o /dev/null --noproxy '*' -k "https://$address/"; then
+  if [ -n "$address" ] && ! curl -s --max-time 8 -o /dev/null --noproxy '*' -k \
+      --resolve "example.com:443:$address" https://example.com/; then
     address=""
   fi
   [ -n "$address" ] || say "WARNING: couldn't reach example.com over IPv4 to test direct connections"
   address6="$(getent ahostsv6 example.com 2>/dev/null | awk 'NR == 1 && $1 ~ /:/ { print $1 }')"
-  if [ -n "$address6" ] && ! curl -s --max-time 8 -o /dev/null --noproxy '*' -k "https://[$address6]/"; then
+  if [ -n "$address6" ] && ! curl -s --max-time 8 -o /dev/null --noproxy '*' -k \
+      --resolve "example.com:443:[$address6]" https://example.com/; then
     address6=""   # no IPv6 route out of this machine; the IPv6 rules are still compared by --check
   fi
 
@@ -347,11 +351,11 @@ verify() {
     fi
 
     # No direct connections, even to an address that works for everyone else
-    if [ -n "$address" ] && as_user_curl "$user" --noproxy '*' -k "https://$address/"; then
+    if [ -n "$address" ] && as_user_curl "$user" --noproxy '*' -k --resolve "example.com:443:$address" https://example.com/; then
       say "ERROR: the $user user can connect directly to $address, bypassing the proxy"
       failed=1
     fi
-    if [ -n "$address6" ] && as_user_curl "$user" --noproxy '*' -k "https://[$address6]/"; then
+    if [ -n "$address6" ] && as_user_curl "$user" --noproxy '*' -k --resolve "example.com:443:[$address6]" https://example.com/; then
       say "ERROR: the $user user can connect directly to $address6 over IPv6, bypassing the proxy"
       failed=1
     fi

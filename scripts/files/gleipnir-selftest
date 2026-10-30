@@ -17,6 +17,8 @@ export LC_ALL=C
 
 [ "$(id -u)" -eq 0 ] || { echo "gleipnir-selftest: run it with sudo" >&2; exit 1; }
 
+cd /   # somewhere every user can be: some commands run as them (find) stop if they can't return to where they started
+
 QUICK=no
 [ "${1:-}" = "--quick" ] && QUICK=yes
 NETWORK="$(cat /etc/gleipnir/claude-network 2>/dev/null || echo allowlist)"
