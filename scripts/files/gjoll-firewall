@@ -18,7 +18,9 @@
 # them a terminal as dev, and claude and runner can't reach the machine's own services on
 # the low ports (1-1023: sshd and the like, which only root can run), so a local login as
 # another user is out of reach. Everything else on localhost (the dev servers, the
-# database, servers of their own) is open to them.
+# database, servers of their own) is open to them. In open mode they still can't reach
+# private networks: in a Vagrant VM the gateway, 10.0.2.2, is your own computer's
+# localhost, with the VM's forwarded ports (sshd among them) and whatever else you run.
 #
 # The rules for IPv4 and IPv6 are each put in place in one step (iptables-restore): all of
 # them or none, so a failure leaves the previous rules as they were, never a gap. --check
@@ -41,6 +43,9 @@ RUNNER_PROXY_PORT=3129
 INNER_PROXY_PORTS=3138,3139
 # The ports only root can listen on, bar DNS (53)
 LOW_PORTS=1:52,54:1023
+# Private and link-local networks, which claude and runner can't reach even in open mode
+PRIVATE_NETS4=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10)
+PRIVATE_NETS6=(fc00::/7 fe80::/10)
 # What was put in place, for --check (root only)
 STATE=/var/lib/gleipnir/gjoll-state
 # Read by gjoll-log, so this script's own DNS test isn't reported as a blocked lookup
@@ -71,8 +76,8 @@ required_users() {
 # Printed in iptables-restore's form, the same for IPv4 and IPv6.
 
 # claude and runner: the same rules, each with its own port on the proxy
-contained_rules() { # chain user own-port other-port
-  local c="$1" user="$2" own="$3" other="$4" proto
+contained_rules() { # chain user own-port other-port family(iptables|ip6tables)
+  local c="$1" user="$2" own="$3" other="$4" ipt="$5" proto net nets
   echo "-A $c -p tcp --dport $EDITOR_PORT -j REJECT --reject-with tcp-reset"
   # Root's services on localhost (sshd, and anything else on a port below 1024, which only
   # root can take), bar DNS, which has rules of its own in each mode
@@ -80,7 +85,15 @@ contained_rules() { # chain user own-port other-port
   echo "-A $c -o lo -p udp -m multiport --dports $LOW_PORTS -j REJECT"
   if [ "$MODE" = "open" ]; then
     echo "-A $c -o lo -j ACCEPT"
+    # Replies first: your computer's connections through the forwarded ports come from the
+    # gateway, which is on a private network
     echo "-A $c -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT"
+    # Not the private networks: in a Vagrant VM the gateway is your own computer
+    if [ "$ipt" = ip6tables ]; then nets=("${PRIVATE_NETS6[@]}"); else nets=("${PRIVATE_NETS4[@]}"); fi
+    for net in "${nets[@]}"; do
+      echo "-A $c -d $net $LOG_LIMIT -j LOG --log-prefix \"gjoll $user blocked: \" --log-uid"
+      echo "-A $c -d $net -j REJECT"
+    done
     echo "-A $c -m conntrack --ctstate NEW -j LOG --log-prefix \"gjoll $user: \" --log-uid"
     echo "-A $c -j ACCEPT"
     return
@@ -123,11 +136,11 @@ postgres_rules() { # chain
   echo "-A $c -j REJECT"
 }
 
-user_rules() { # user
+user_rules() { # user family(iptables|ip6tables)
   local c="${CHAINS[$1]}"
   case "$1" in
-    claude)   contained_rules "$c" claude "$CLAUDE_PROXY_PORT" "$RUNNER_PROXY_PORT" ;;
-    runner)   contained_rules "$c" runner "$RUNNER_PROXY_PORT" "$CLAUDE_PROXY_PORT" ;;
+    claude)   contained_rules "$c" claude "$CLAUDE_PROXY_PORT" "$RUNNER_PROXY_PORT" "$2" ;;
+    runner)   contained_rules "$c" runner "$RUNNER_PROXY_PORT" "$CLAUDE_PROXY_PORT" "$2" ;;
     proxy)    proxy_rules "$c" ;;
     postgres) postgres_rules "$c" ;;
   esac
@@ -136,12 +149,15 @@ user_rules() { # user
 # The intended rules, for every user that exists. Their fingerprint tells --check whether
 # the rules in place were made from the current settings.
 intended() {
-  local user uid
+  local user uid ipt
   echo "mode $MODE"
-  for user in "${USERS[@]}"; do
-    uid="$(uid_of "$user")" || continue
-    echo "user $user $uid"
-    user_rules "$user"
+  for ipt in iptables ip6tables; do
+    echo "== $ipt"
+    for user in "${USERS[@]}"; do
+      uid="$(uid_of "$user")" || continue
+      echo "user $user $uid"
+      user_rules "$user" "$ipt"
+    done
   done
 }
 
@@ -159,7 +175,7 @@ restore_input() { # ipt
   for chain in $leftovers; do echo ":$chain - [0:0]"; done
   for user in "${USERS[@]}"; do
     uid_of "$user" >/dev/null || continue
-    user_rules "$user"
+    user_rules "$user" "$ipt"
   done
   "$ipt" -S OUTPUT 2>/dev/null | grep -E -- "-j ($OUR_CHAINS)(\.new)?\$" | sed 's/^-A /-D /'
   for chain in $leftovers; do echo "-X $chain"; done
@@ -208,7 +224,7 @@ structure() { # ipt
     fi
     i=$((i + 1))
     rules="$(listing "$ipt" "$chain" | grep '^-A ')"
-    expected="$(user_rules "$user" | wc -l)"
+    expected="$(user_rules "$user" "$ipt" | wc -l)"
     if [ "$(printf '%s\n' "$rules" | grep -c '^-A ')" -ne "$expected" ]; then
       say "$ipt: $chain should have $expected rules"
       problems=1
@@ -317,7 +333,7 @@ as_user_curl() { # user curl-args...
 as_claude_curl() { as_user_curl claude "$@"; }
 
 verify() {
-  local failed=0 code address address6 user other result sshd_up
+  local failed=0 code address address6 user other result sshd_up gateway
 
   for user in claude runner proxy postgres; do
     uid_of "$user" >/dev/null || continue
@@ -328,6 +344,14 @@ verify() {
   done
 
   if [ "$MODE" = "open" ]; then
+    # The gateway, when it's on a private network (in a Vagrant VM it's your computer), is
+    # the one private address sure to answer root: so it must not answer claude or runner
+    gateway="$(ip -4 route show default 2>/dev/null | awk '{ print $3; exit }')"
+    if [[ "$gateway" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]] \
+        && ! ping -c 1 -W 2 "$gateway" >/dev/null 2>&1; then
+      say "WARNING: the gateway ($gateway) doesn't answer root, so the private-network block couldn't be tested"
+      gateway=""
+    fi
     for user in claude runner; do
       uid_of "$user" >/dev/null || continue
       if timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' 2>/dev/null \
@@ -335,8 +359,12 @@ verify() {
         say "ERROR: the $user user can reach sshd on localhost"
         failed=1
       fi
+      if [ -n "$gateway" ] && sudo -u "$user" ping -c 1 -W 2 "$gateway" >/dev/null 2>&1; then
+        say "ERROR: the $user user can reach the gateway ($gateway), which in a Vagrant VM is your own computer"
+        failed=1
+      fi
     done
-    [ "$failed" -eq 0 ] && echo "Gjöll: verified (editor and sshd blocked; open network)"
+    [ "$failed" -eq 0 ] && echo "Gjöll: verified (editor, sshd and private networks blocked; open network)"
     return "$failed"
   fi
 

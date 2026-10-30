@@ -33,9 +33,12 @@ import time
 HEADER = "Heimdall: review these before merging Claude's work."
 WORK = "/srv/work"
 
-# Folders never scanned (dependencies, build output, git internals)
-SKIP_DIRS = {"node_modules", "vendor", "storage", ".git", ".svelte-kit", "build", "dist", ".next", ".nuxt",
-             ".output", ".vercel"}
+# Folders never looked in: packages and git's own, which aren't the project's files
+DEPENDENCY_DIRS = {"node_modules", "vendor", ".git"}
+# Build output, left out of the scan of Claude's copy (it can be huge); what's committed
+# in a folder of that name is still checked when a branch arrives in your copy
+OUTPUT_DIRS = {"storage", ".svelte-kit", "build", "dist", ".next", ".nuxt", ".output", ".vercel"}
+SKIP_DIRS = DEPENDENCY_DIRS | OUTPUT_DIRS
 
 # Files that can make something run code
 SENSITIVE_NAMES = [
@@ -43,6 +46,8 @@ SENSITIVE_NAMES = [
     ".npmrc", ".yarnrc", ".yarnrc.yml", ".envrc", "Makefile", "Vagrantfile", "*.sh",
     "*.config.js", "*.config.cjs", "*.config.mjs", "*.config.ts", "*.config.cts", "*.config.mts",
     ".eslintrc*", ".prettierrc*", ".babelrc*", ".gitattributes", ".gitmodules",
+    # The editor's TypeScript service loads the plugins these name
+    "tsconfig*.json", "jsconfig*.json",
     # Claude Code's own project settings: MCP servers, hooks and commands
     ".mcp.json",
     # Task runners, git hook managers and workspaces
@@ -100,13 +105,17 @@ def project_root(path):
         probe = parent
 
 
-def is_sensitive(rel):
+def is_sensitive(rel, skip=SKIP_DIRS):
+    """Is this a file Heimdall watches? A watched folder counts wherever it is, even inside
+    a folder that's otherwise skipped (.github/actions/build/action.yml is still an action)."""
     parts = rel.split("/")
     folders, name = parts[:-1], parts[-1]
-    if rel in IGNORED_FILES or SKIP_DIRS.intersection(folders):
+    if rel in IGNORED_FILES:
         return False
     if SENSITIVE_DIRS.intersection(folders):
-        return True
+        return not DEPENDENCY_DIRS.intersection(folders)
+    if skip.intersection(folders):
+        return False
     return any(fnmatch.fnmatch(name, pattern) for pattern in SENSITIVE_NAMES)
 
 
@@ -139,7 +148,11 @@ class Scan:
         for cur, dirs, files in os.walk(self.root, onerror=unreadable):
             rel = os.path.relpath(cur, self.root)
             parts = [] if rel == "." else rel.split(os.sep)
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            # Skipped folders are pruned, unless they're inside a watched folder
+            if not SENSITIVE_DIRS.intersection(parts):
+                dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            else:
+                dirs[:] = [d for d in dirs if d not in DEPENDENCY_DIRS]
             if len(parts) >= MAX_DEPTH and dirs:
                 self.note(f"folders deeper than {MAX_DEPTH} levels weren't checked ({rel})")
                 dirs[:] = []
@@ -161,7 +174,7 @@ class Scan:
         found = []
         for parts, name, can_run in self.files:
             rel = os.path.join(*parts, name) if parts else name
-            if is_sensitive(rel) or (can_run and not SKIP_DIRS.intersection(parts)):
+            if is_sensitive(rel) or (can_run and not DEPENDENCY_DIRS.intersection(parts)):
                 found.append(rel)
         return sorted(found)
 
@@ -509,7 +522,8 @@ def review_lines(repo, base, branch):
             if path and meta.startswith(":"):
                 bits = meta[1:].split()
                 if len(bits) >= 5:
-                    changed.append((bits[4][:1], path, bits[1].endswith("755")))
+                    # Runnable before or after: a runnable file removed, or made plain, counts too
+                    changed.append((bits[4][:1], path, bits[0].endswith("755") or bits[1].endswith("755")))
     else:  # nothing in common: everything on the branch is new
         listing = git(repo, "ls-tree", "-r", "-z", branch)
         for entry in listing.split("\0"):
@@ -519,8 +533,9 @@ def review_lines(repo, base, branch):
                 changed.append(("A", path, bits[0].endswith("755") if bits else False))
     kinds = {"A": "added   ", "M": "changed ", "D": "removed ", "T": "changed "}
     lines = []
+    # Committed files are the project's own wherever they are, bar packages and git's folders
     sensitive = [(kinds.get(status, "changed "), path) for status, path, can_run in changed
-                 if is_sensitive(path) or (can_run and not SKIP_DIRS.intersection(path.split("/")[:-1]))]
+                 if is_sensitive(path, DEPENDENCY_DIRS) or (can_run and not DEPENDENCY_DIRS.intersection(path.split("/")[:-1]))]
     if sensitive:
         lines.append("Watched files were changed (package, config and deploy files, scripts, runnable files):")
         lines += [f"  {kind}{path}" for kind, path in sensitive]

@@ -35,11 +35,14 @@ if [ -n "${GLEIPNIR_KEY:-}" ]; then
   cp "$GLEIPNIR_KEY" "$stage/deploy_key"
 fi
 
-# The git server's name, from git@host:…, ssh://…@host/… or https://host/…
+# The git server's name, from git@host:…, ssh://…@host/… or https://host/…, and its port
+# when an ssh:// URL gives one (ssh://git@host:2222/…)
 host="$(printf '%s' "$REPO" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#[:/].*$##')"
+port="$(printf '%s' "$REPO" | sed -nE 's#^ssh://([^@/]*@)?[^:/]+:([0-9]+)/.*$#\2#p')"
 
 if [ -n "${GLEIPNIR_KEY:-}" ] && [ -n "$host" ]; then
   printf 'Host %s\n  IdentityFile ~/.ssh/deploy_key\n  IdentitiesOnly yes\n' "$host" > "$stage/config"
+  [ -z "$port" ] || printf '  Port %s\n' "$port" >> "$stage/config"
 fi
 
 # The server's SSH identity, so the first connection can't be impersonated: the key you
@@ -56,7 +59,7 @@ for key in json.load(sys.stdin)["ssh_keys"]:
     print("github.com " + key)' > "$stage/known_hosts"
 elif [ -n "$host" ]; then
   warn "Trusting $host's SSH key on first use (to pin it, set repo_host_key in the machine's config)"
-  ssh-keyscan "$host" > "$stage/known_hosts" 2>/dev/null || true
+  ssh-keyscan ${port:+-p "$port"} "$host" > "$stage/known_hosts" 2>/dev/null || true
   [ -s "$stage/known_hosts" ] || rm -f "$stage/known_hosts"
 fi
 

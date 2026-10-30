@@ -72,6 +72,21 @@ class SensitiveTest(unittest.TestCase):
         for rel in ["src/app.ts", "node_modules/x/package.json", ".idea/workspace.xml", "README.md"]:
             self.assertFalse(heimdall.is_sensitive(rel), rel)
 
+    def test_watched_folders_inside_skipped_ones(self):
+        # A watched folder counts wherever it is, except inside packages
+        self.assertTrue(heimdall.is_sensitive(".github/actions/build/action.yml"))
+        self.assertTrue(heimdall.is_sensitive("dist/.vscode/tasks.json"))
+        self.assertFalse(heimdall.is_sensitive("node_modules/x/.github/workflows/ci.yml"))
+        # Build output isn't scanned in Claude's copy, but what's committed there is checked
+        self.assertFalse(heimdall.is_sensitive("services/build/package.json"))
+        self.assertTrue(heimdall.is_sensitive("services/build/package.json", heimdall.DEPENDENCY_DIRS))
+        self.assertTrue(heimdall.is_sensitive("dist/Dockerfile", heimdall.DEPENDENCY_DIRS))
+        self.assertFalse(heimdall.is_sensitive("vendor/x/Dockerfile", heimdall.DEPENDENCY_DIRS))
+
+    def test_typescript_config(self):
+        for rel in ["tsconfig.json", "tsconfig.build.json", "jsconfig.json", "apps/web/tsconfig.json"]:
+            self.assertTrue(heimdall.is_sensitive(rel), rel)
+
 
 class WorkingTreeTest(unittest.TestCase):
     def setUp(self):
@@ -172,6 +187,12 @@ class WorkingTreeTest(unittest.TestCase):
                                  write(self.path("src", "helper"), "y")))
         self.assertEqual(out, "")
 
+    def test_watched_folder_inside_a_skipped_name_is_scanned(self):
+        out = self.diff(lambda: (write(self.path(".github", "workflows", "build", "ci.yml"), "on: push"),
+                                 write(self.path("dist", "package.json"), "{}")))
+        self.assertIn("added   .github/workflows/build/ci.yml", out)
+        self.assertNotIn("dist/package.json", out)   # build output: checked when committed, not here
+
     def test_making_a_file_runnable_is_a_change(self):
         write(self.path("tool"), "x", 0o644)
         out = self.diff(lambda: os.chmod(self.path("tool"), 0o755))
@@ -256,6 +277,33 @@ class BranchReviewTest(unittest.TestCase):
         out = "\n".join(heimdall.review_lines(self.repo, "refs/heads/main", "refs/heads/wip/z"))
         self.assertIn("added   scripts/deploy", out)
         self.assertNotIn("app.ts", out)
+
+    def test_removed_or_unmarked_runnable_file_in_a_commit(self):
+        write(os.path.join(self.repo, "scripts", "deploy"), "#!/bin/sh\n", 0o755)
+        write(os.path.join(self.repo, "bin", "serve"), "#!/bin/sh\n", 0o755)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "tools")
+        self.git("checkout", "-q", "-b", "wip/w")
+        os.remove(os.path.join(self.repo, "scripts", "deploy"))
+        os.chmod(os.path.join(self.repo, "bin", "serve"), 0o644)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "quietly")
+        out = "\n".join(heimdall.review_lines(self.repo, "refs/heads/main", "refs/heads/wip/w"))
+        self.assertIn("removed scripts/deploy", out)
+        self.assertIn("changed bin/serve", out)
+
+    def test_committed_build_output_and_typescript_config(self):
+        self.git("checkout", "-q", "-b", "wip/v")
+        write(os.path.join(self.repo, "dist", "Dockerfile"), "FROM scratch")
+        write(os.path.join(self.repo, "services", "build", "package.json"), "{}")
+        write(os.path.join(self.repo, "tsconfig.json"), '{"compilerOptions": {"plugins": [{"name": "x"}]}}')
+        write(os.path.join(self.repo, "node_modules", "x", "package.json"), "{}")
+        self.git("add", "-A", "-f")
+        self.git("commit", "-qm", "output")
+        out = "\n".join(heimdall.review_lines(self.repo, "refs/heads/main", "refs/heads/wip/v"))
+        for name in ("dist/Dockerfile", "services/build/package.json", "tsconfig.json"):
+            self.assertIn(f"added   {name}", out)
+        self.assertNotIn("node_modules", out)
 
     def test_no_base_branch(self):
         out = "\n".join(heimdall.review_lines(self.repo, "", "refs/heads/main"))
