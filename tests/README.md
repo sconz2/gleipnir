@@ -29,11 +29,11 @@ tests/vm/selftest.sh my-project --quick    # without Gjöll's network tests
 
 It checks that each user can do what it should and nothing more:
 
-- **Users:** none has `sudo`; `claude` and `runner` can't use cron, linger or polkit, and Gjöll starts before logins at boot.
+- **Users:** none has `sudo`; the box's `vagrant` account is locked and SSH takes keys only; no account that can use `sudo` has a password; `claude` and `runner` can't use cron, linger or polkit, and Gjöll starts before logins at boot.
 - **Your copy:** Claude and the dev servers can't see it. Git has no exceptions that would let `dev` work in Claude's copy.
 - **Claude's copy:** its `.git` is Claude's alone, and `dev`'s git refuses to run there. A hook and an `fsmonitor` setting planted in a repo of Claude's never run as `dev`.
 - **Settings:** Claude's managed settings, `CLAUDE.md` and `.npmrc` are root's.
-- **Gjöll:** every firewall rule is in place for IPv4 and IPv6. The network tests (no DNS, no direct connections, the proxy's refusals) run unless `--quick`.
+- **Gjöll:** every firewall rule is in place for IPv4 and IPv6, and `claude` and `runner` can't reach sshd on localhost. The network tests (no DNS, no direct connections, the proxy's refusals) run unless `--quick`.
 - **Dev servers:** they run as `runner` and can't see your copy. `dev` can control them and nothing else.
 - **The editor:** it asks for a password, which only root can read.
 - **The database:** the app's user isn't a superuser, and can make databases only if `postgres.createdb` says so.

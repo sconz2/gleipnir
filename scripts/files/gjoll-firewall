@@ -15,7 +15,10 @@
 #             replies to connections made to it. It never needs to connect out.
 #
 # In every mode, none of them can connect to the editor (port 8080), which would give
-# them a terminal as dev.
+# them a terminal as dev, and claude and runner can't reach the machine's own services on
+# the low ports (1-1023: sshd and the like, which only root can run), so a local login as
+# another user is out of reach. Everything else on localhost (the dev servers, the
+# database, servers of their own) is open to them.
 #
 # The rules for IPv4 and IPv6 are each put in place in one step (iptables-restore): all of
 # them or none, so a failure leaves the previous rules as they were, never a gap. --check
@@ -36,6 +39,8 @@ CLAUDE_PROXY_PORT=3128
 RUNNER_PROXY_PORT=3129
 # Squid's inner ports, which only Squid itself may use
 INNER_PROXY_PORTS=3138,3139
+# The ports only root can listen on, bar DNS (53)
+LOW_PORTS=1:52,54:1023
 # What was put in place, for --check (root only)
 STATE=/var/lib/gleipnir/gjoll-state
 # Read by gjoll-log, so this script's own DNS test isn't reported as a blocked lookup
@@ -69,6 +74,10 @@ required_users() {
 contained_rules() { # chain user own-port other-port
   local c="$1" user="$2" own="$3" other="$4" proto
   echo "-A $c -p tcp --dport $EDITOR_PORT -j REJECT --reject-with tcp-reset"
+  # Root's services on localhost (sshd, and anything else on a port below 1024, which only
+  # root can take), bar DNS, which has rules of its own in each mode
+  echo "-A $c -o lo -p tcp -m multiport --dports $LOW_PORTS -j REJECT --reject-with tcp-reset"
+  echo "-A $c -o lo -p udp -m multiport --dports $LOW_PORTS -j REJECT"
   if [ "$MODE" = "open" ]; then
     echo "-A $c -o lo -j ACCEPT"
     echo "-A $c -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT"
@@ -308,7 +317,7 @@ as_user_curl() { # user curl-args...
 as_claude_curl() { as_user_curl claude "$@"; }
 
 verify() {
-  local failed=0 code address address6 user other result
+  local failed=0 code address address6 user other result sshd_up
 
   for user in claude runner proxy postgres; do
     uid_of "$user" >/dev/null || continue
@@ -319,7 +328,15 @@ verify() {
   done
 
   if [ "$MODE" = "open" ]; then
-    [ "$failed" -eq 0 ] && echo "Gjöll: verified (editor blocked; open network)"
+    for user in claude runner; do
+      uid_of "$user" >/dev/null || continue
+      if timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' 2>/dev/null \
+          && sudo -u "$user" timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' 2>/dev/null; then
+        say "ERROR: the $user user can reach sshd on localhost"
+        failed=1
+      fi
+    done
+    [ "$failed" -eq 0 ] && echo "Gjöll: verified (editor and sshd blocked; open network)"
     return "$failed"
   fi
 
@@ -341,9 +358,18 @@ verify() {
     address6=""   # no IPv6 route out of this machine; the IPv6 rules are still compared by --check
   fi
 
+  # sshd, if it's listening: a login as another user would be a way round everything
+  sshd_up=no
+  if timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' 2>/dev/null; then sshd_up=yes; fi
+
   for user in claude runner; do
     uid_of "$user" >/dev/null || continue
     if [ "$user" = claude ]; then other="$RUNNER_PROXY_PORT"; else other="$CLAUDE_PROXY_PORT"; fi
+
+    if [ "$sshd_up" = yes ] && sudo -u "$user" timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' 2>/dev/null; then
+      say "ERROR: the $user user can reach sshd on localhost"
+      failed=1
+    fi
 
     if sudo -u "$user" getent ahosts example.com >/dev/null 2>&1; then
       say "ERROR: the $user user can look up names (DNS isn't blocked)"

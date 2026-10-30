@@ -16,7 +16,6 @@ set -uo pipefail
 export LC_ALL=C
 
 [ "$(id -u)" -eq 0 ] || { echo "gleipnir-selftest: run it with sudo" >&2; exit 1; }
-
 cd /   # somewhere every user can be: some commands run as them (find) stop if they can't return to where they started
 
 QUICK=no
@@ -80,6 +79,22 @@ for user in dev claude runner; do
 done
 shouldnt "dev isn't in the project group" bash -c "id -nG dev | grep -qw project"
 should "claude and runner are in the project group" bash -c "id -nG claude | grep -qw project && id -nG runner | grep -qw project"
+# The base box's own admin account, and any other way to root through a password
+if id vagrant >/dev/null 2>&1; then
+  should "the box's vagrant account has no usable password (locked)" bash -c "passwd -S vagrant | awk '\$2 == \"L\" { found = 1 } END { exit !found }'"
+  should "sshd takes keys only, no passwords" bash -c "sshd -T 2>/dev/null | grep -qx 'passwordauthentication no'"
+fi
+open_accounts=""
+while IFS=: read -r user _ uid _; do
+  { [ "$uid" -eq 0 ] || [ "$uid" -ge 1000 ]; } && [ "$user" != nobody ] || continue
+  sudo -n -l -U "$user" 2>/dev/null | grep -q 'is not allowed to run sudo' && continue
+  [ "$(passwd -S "$user" 2>/dev/null | awk '{ print $2 }')" = P ] && open_accounts="$open_accounts $user"
+done < /etc/passwd
+if id vagrant >/dev/null 2>&1; then
+  should "no account that can use sudo has a password (anyone could try it with su)${open_accounts:+:$open_accounts}" test -z "$open_accounts"
+elif [ -n "$open_accounts" ]; then
+  echo "  note  these accounts can use sudo and have a password:$open_accounts (anyone in the machine can try it with su)"
+fi
 
 # --- Nothing runs outside a session --------------------------------------------------------
 section "Nothing of claude's or runner's runs outside their sessions"
@@ -161,6 +176,14 @@ refused "runner can't read the machine's config (passwords)" "permission denied"
 # --- Gjöll -------------------------------------------------------------------------------------
 section "Gjöll"
 should "every firewall rule is in place, as it should be (gjoll-firewall --check)" /usr/local/sbin/gjoll-firewall --check
+if timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' 2>/dev/null; then
+  ok "(control: root can reach sshd on localhost)"
+  for user in claude runner; do
+    refused "$user can't reach sshd on localhost (port 22)" "refused" sudo -u "$user" timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22'
+  done
+else
+  echo "  note  sshd isn't listening on localhost, so that couldn't be tested"
+fi
 if [ "$NETWORK" = "allowlist" ]; then
   if resolvectl query example.com >/dev/null 2>&1; then
     ok "(control: root can look names up through systemd-resolved)"

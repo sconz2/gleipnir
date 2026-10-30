@@ -147,7 +147,7 @@ A monorepo keeps related apps in one repo, each in its own folder, such as a Sve
 - **Each app's folder** is named after it, unless you give a `path` (such as `"path": "apps/web"`). It can be `"."`, the repo's root, for one of them.
 - **Each app's port is the same inside the machine and on your computer.** So `http://localhost:8001` reaches the backend from your browser, from the frontend's dev server inside the machine, and from Claude, and the frontend can call the API at the same address everywhere. Each port must be unique across all your machines, and `ports.app` isn't used.
 - **Each app has its own `.env`**, copied from `env/my-project/<app>.env` on your computer into the app's folder (see [The .env files](#the-env-files)).
-- **Each app's packages** (npm, and Composer for PHP apps) are installed in its folder in Claude's copy when the machine is first set up, as `claude`, behind Gjöll. After that, Claude installs them.
+- **Each app's packages** (npm, and Composer for PHP apps) are installed in its folder in Claude's copy by the first provision that finds them missing, as `claude`, behind Gjöll. After that, Claude installs them.
 - **Each app has its own dev server**, controlled with `devserver <command> <app>`.
 
 An app's folder doesn't have to exist yet: on a new repo, `/project-init` creates each app in its folder. Provision again afterwards to copy in their `.env` files and start their dev servers.
@@ -203,7 +203,7 @@ The database user isn't a PostgreSQL superuser, on purpose: a superuser can run 
 
 ### The `.env` files
 
-`env/my-project.env` is copied to `/srv/work/.env` (Claude's copy, where the apps run), and in a monorepo each `env/my-project/<app>.env` to that app's folder, on every provision, readable by Claude's tools and the dev servers only. **The copies on your computer win:** changes made inside the machine are overwritten. An app whose folder doesn't exist yet gets its `.env` on the first provision after it does.
+`env/my-project.env` is copied to `/srv/work/.env` (Claude's copy, where the apps run), and in a monorepo each `env/my-project/<app>.env` to that app's folder, on every provision, readable only by Claude and the dev servers. **The copies on your computer win:** changes made inside the machine are overwritten. An app whose folder doesn't exist yet gets its `.env` on the first provision after it does.
 
 **Keep production secrets out of these files.** Claude's file tools can't read `.env` files, but code Claude runs (tests, scripts, a package it installed) can, so use development values only: a local database password, test API keys and so on.
 
@@ -414,7 +414,7 @@ Each `machines/<name>.json` file supports:
 | `devserver.enabled` | `true` | Run the dev servers in the background |
 | `devserver.command` | worked out from the project | The command that starts the dev server (for a project with one app). It must listen on `$HOST` and `$PORT` |
 | `playwright.enabled` | `false` | Install Playwright's browsers |
-| `playwright.browsers` | `["chromium"]` | Which browsers: `chromium`, `firefox`, `webkit` |
+| `playwright.browsers` | `["chromium"]` | Which browsers: `chromium`, `firefox`, `webkit` (or `chrome`, `msedge`) |
 | `extensions` | Svelte, Tailwind, ESLint, Prettier | Editor extensions to install, by ID from the Open VSX registry (add `@1.2.3` for a particular version) |
 | `postgres.enabled` | `false` | Install PostgreSQL |
 | `postgres.version` | 18 | PostgreSQL major version, 15 or later |

@@ -78,7 +78,9 @@ tmp="$(mktemp ~/.config/code-server/.config.XXXXXX)"
   printf 'bind-addr: %s\n' "$bind"
   printf 'auth: %s\n' "$auth"
   if [ "$auth" = password ]; then printf 'password: "%s"\n' "$(cat "$secret")"; fi
-  printf 'cert: false\ndisable-telemetry: true\ndisable-update-check: true\n'
+  # No passing local ports through the editor (/proxy/<port>/): a page from a dev server
+  # shown that way would run as part of the editor in your browser, logged in as you
+  printf 'cert: false\ndisable-proxy: true\ndisable-telemetry: true\ndisable-update-check: true\n'
 } > "$tmp"
 chmod 0600 "$tmp"
 mv -f -T "$tmp" ~/.config/code-server/config.yaml
